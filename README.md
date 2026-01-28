@@ -26,7 +26,7 @@ Built on [CLIProxyAPIPlus](https://github.com/router-for-me/CLIProxyAPIPlus), it
 > [!TIP]
 > 📣 **NEW: Kimi support + Ollama-compatible server!**<br>Connect Kimi (Moonshot AI) via OAuth device flow and optionally enable an Ollama-compatible server on port 11434 for tools that expect Ollama.
 >
-> **Latest models supported:** Gemini 3 Pro (via Antigravity), GPT-5.1 / GPT-5.1 Codex, Claude Sonnet 4.5 / Opus 4.5 with extended thinking, GitHub Copilot, and Z.AI GLM-4.7! 🚀 
+> **Latest models supported:** Gemini 3 Pro (via Antigravity), GPT-5.1 / GPT-5.1 Codex, Claude Sonnet 4.5 / Opus 4.5 with extended thinking, Kimi K2.5, GitHub Copilot, and Z.AI GLM-4.7! 🚀 
 > 
 > **Setup Guides:**
 > - [Factory CLI Setup →](FACTORY_SETUP.md) - Use Factory Droids with your AI subscriptions
