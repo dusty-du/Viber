@@ -131,6 +131,7 @@ VibeProxy includes an Ollama-compatible API server on port 11434. Enable it in S
 ## Requirements
 
 Precompiled releases only support Apple Silicon.
+- macOS 26.1 or later
 
 ## Development
 
