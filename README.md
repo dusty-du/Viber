@@ -138,39 +138,43 @@ VibeProxy includes an Ollama-compatible API server on port 11434. Enable it in S
 
 ```
 VibeProxy/
-├── Sources/
-│   ├── main.swift              # App entry point
-│   ├── AppDelegate.swift       # Menu bar & window management
-│   ├── ServerManager.swift     # Server process control & auth
-│   ├── OllamaProxy.swift      # Ollama-compatible API server (port 11434)
-│   ├── SettingsView.swift      # Main UI
-│   ├── AuthStatus.swift        # Auth file monitoring
-│   └── Resources/
-│       ├── AppIcon.iconset     # App icon
-│       ├── AppIcon.icns        # App icon
-│       ├── cli-proxy-api-plus  # CLIProxyAPIPlus binary
-│       ├── config.yaml         # CLIProxyAPIPlus config
-│       ├── icon-active.png     # Menu bar icon (active)
-│       ├── icon-inactive.png   # Menu bar icon (inactive)
-│       ├── icon-claude.png     # Claude Code service icon
-│       ├── icon-codex.png      # Codex service icon
-│       ├── icon-gemini.png     # Gemini service icon
-│       ├── icon-qwen.png       # Qwen service icon
-│       └── icon-zai.png        # Z.AI GLM service icon
-├── Package.swift               # Swift Package Manager config
-├── Info.plist                  # macOS app metadata
-├── build.sh                    # Resource bundling script
-├── create-app-bundle.sh        # App bundle creation script
-└── Makefile                    # Build automation
+├── src/
+│   ├── Package.swift               # Swift Package Manager config
+│   ├── Info.plist                  # macOS app metadata
+│   └── Sources/
+│       ├── main.swift              # App entry point
+│       ├── AppDelegate.swift       # Menu bar & window management
+│       ├── ServerManager.swift     # Server process control & auth
+│       ├── ThinkingProxy.swift     # Extended thinking request modifier (port 8317)
+│       ├── OllamaProxy.swift      # Ollama-compatible API server (port 11434)
+│       ├── TunnelManager.swift     # Network tunneling
+│       ├── SettingsView.swift      # Main UI
+│       ├── AuthStatus.swift        # Auth file monitoring
+│       ├── IconCatalog.swift       # Icon management
+│       ├── NotificationNames.swift # Notification constants
+│       └── Resources/
+│           ├── AppIcon.icns        # App icon
+│           ├── cli-proxy-api-plus  # CLIProxyAPIPlus binary
+│           ├── config.yaml         # CLIProxyAPIPlus config
+│           ├── icon-active.png     # Menu bar icon (active)
+│           ├── icon-inactive.png   # Menu bar icon (inactive)
+│           └── icon-*.png          # Service icons (claude, codex, gemini, qwen, zai)
+├── patches/                        # Git patches for additional features
+├── scripts/                        # Release and utility scripts
+├── create-app-bundle.sh            # App bundle creation script
+├── Makefile                        # Build automation
+└── CHANGELOG.md                    # Version history
 ```
 
 ### Key Components
 
 - **AppDelegate**: Manages the menu bar item and settings window lifecycle
-- **ServerManager**: Controls the cli-proxy-api server process and OAuth authentication
+- **ServerManager**: Controls the CLIProxyAPIPlus server process and OAuth authentication
+- **ThinkingProxy**: HTTP proxy (port 8317) that intercepts requests to add extended thinking parameters for Claude models and handles Kimi reasoning content
+- **OllamaProxy**: Translates between Ollama API format and OpenAI API format (port 11434)
+- **TunnelManager**: Network tunneling utilities
 - **SettingsView**: SwiftUI interface with native macOS design
-- **AuthStatus**: Monitors `~/.cli-proxy-api/` for authentication files
-- **File Monitoring**: Real-time updates when auth files are added/removed
+- **AuthStatus**: Monitors `~/.cli-proxy-api/` for authentication files with real-time updates
 
 ## Credits
 
@@ -189,4 +193,4 @@ MIT License - see LICENSE file for details
 
 ---
 
-© 2025 [Automaze, Ltd.](https://automaze.io) All rights reserved.
+© 2025-2026 [Automaze, Ltd.](https://automaze.io) All rights reserved.
