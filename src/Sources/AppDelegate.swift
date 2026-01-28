@@ -4,10 +4,9 @@ import WebKit
 import UserNotifications
 import Sparkle
 
-class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNotificationCenterDelegate {
+class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate {
     var statusItem: NSStatusItem!
-    var menu: NSMenu!
-    weak var settingsWindow: NSWindow?
+    private var settingsPopover: NSPopover?
     var serverManager: ServerManager!
     var thinkingProxy: ThinkingProxy!
     var ollamaProxy: OllamaProxy!
@@ -24,13 +23,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNoti
         // Setup standard Edit menu for keyboard shortcuts (Cmd+C/V/X/A)
         setupMainMenu()
 
-        // Setup menu bar
-        setupMenuBar()
-
         // Initialize managers
         serverManager = ServerManager()
         thinkingProxy = ThinkingProxy()
         ollamaProxy = OllamaProxy()
+
+        // Setup menu bar + settings popover
+        setupMenuBar()
+        configurePopover()
 
         // Sync Vercel AI Gateway config from ServerManager to ThinkingProxy
         syncVercelConfig()
@@ -134,77 +134,40 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNoti
                 button.image = fallback
                 NSLog("[MenuBar] Failed to load inactive icon from bundle; using fallback system icon")
             }
+            button.target = self
+            button.action = #selector(togglePopover)
         }
-
-        menu = NSMenu()
-
-        // Server Status
-        menu.addItem(NSMenuItem(title: "Server: Stopped", action: nil, keyEquivalent: ""))
-        menu.addItem(NSMenuItem.separator())
-
-        // Main Actions
-        menu.addItem(NSMenuItem(title: "Open Settings", action: #selector(openSettings), keyEquivalent: "s"))
-        menu.addItem(NSMenuItem.separator())
-
-        // Server Control
-        let startStopItem = NSMenuItem(title: "Start Server", action: #selector(toggleServer), keyEquivalent: "")
-        startStopItem.tag = 100
-        menu.addItem(startStopItem)
-
-        menu.addItem(NSMenuItem.separator())
-
-        // Copy URL
-        let copyURLItem = NSMenuItem(title: "Copy Server URL", action: #selector(copyServerURL), keyEquivalent: "c")
-        copyURLItem.isEnabled = false
-        copyURLItem.tag = 102
-        menu.addItem(copyURLItem)
-
-        menu.addItem(NSMenuItem.separator())
-
-        // Check for Updates
-        let checkForUpdatesItem = NSMenuItem(title: "Check for Updates...", action: #selector(SPUStandardUpdaterController.checkForUpdates(_:)), keyEquivalent: "u")
-        checkForUpdatesItem.target = updaterController
-        menu.addItem(checkForUpdatesItem)
-
-        menu.addItem(NSMenuItem.separator())
-
-        // Quit
-        menu.addItem(NSMenuItem(title: "Quit", action: #selector(quit), keyEquivalent: "q"))
-
-        statusItem.menu = menu
     }
 
-
-
-    @objc func openSettings() {
-        if settingsWindow == nil {
-            createSettingsWindow()
-        }
-        settingsWindow?.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
-    }
-
-    func createSettingsWindow() {
-        let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 1000, height: 900),
-            styleMask: [.titled, .closable, .miniaturizable, .resizable],
-            backing: .buffered,
-            defer: false
+    private func configurePopover() {
+        let actions = SettingsActions(
+            onToggleServer: { [weak self] in self?.toggleServer() },
+            onCopyURL: { [weak self] in self?.copyServerURL() },
+            onCheckForUpdates: { [weak self] in self?.updaterController.checkForUpdates(nil) },
+            onQuit: { [weak self] in self?.quit() }
         )
-        window.title = "VibeProxy"
-        window.center()
-        window.delegate = self
-        window.isReleasedWhenClosed = false
 
-        let contentView = SettingsView(serverManager: serverManager)
-        window.contentView = NSHostingView(rootView: contentView)
+        let contentView = SettingsView(serverManager: serverManager, actions: actions)
+        let hostingController = NSHostingController(rootView: contentView)
 
-        settingsWindow = window
+        let popover = NSPopover()
+        popover.contentViewController = hostingController
+        popover.behavior = .transient
+        popover.contentSize = NSSize(width: 640, height: 520)
+        settingsPopover = popover
     }
 
-    func windowDidClose(_ notification: Notification) {
-        if notification.object as? NSWindow === settingsWindow {
-            settingsWindow = nil
+    @objc func togglePopover() {
+        guard let button = statusItem.button, let popover = settingsPopover else { return }
+
+        if popover.isShown {
+            popover.performClose(nil)
+        } else {
+            NSApp.activate(ignoringOtherApps: true)
+            popover.show(relativeTo: button.bounds, of: button, preferredEdge: .maxY)
+            DispatchQueue.main.async { [weak popover] in
+                popover?.contentViewController?.view.window?.makeKeyAndOrderFront(nil)
+            }
         }
     }
 
@@ -286,20 +249,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNoti
     }
 
     @objc func updateMenuBarStatus() {
-        // Update status items
-        if let serverStatus = menu.item(at: 0) {
-            serverStatus.title = serverManager.isRunning ? "Server: Running (port \(thinkingProxy.proxyPort))" : "Server: Stopped"
-        }
-
-        // Update button states
-        if let startStopItem = menu.item(withTag: 100) {
-            startStopItem.title = serverManager.isRunning ? "Stop Server" : "Start Server"
-        }
-
-        if let copyURLItem = menu.item(withTag: 102) {
-            copyURLItem.isEnabled = serverManager.isRunning
-        }
-
         // Update icon based on server status
         if let button = statusItem.button {
             let iconName = serverManager.isRunning ? "icon-active.png" : "icon-inactive.png"

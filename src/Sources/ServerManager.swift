@@ -442,12 +442,12 @@ class ServerManager: ObservableObject {
                     completion(true, "🌐 Browser opened for authentication.\n\nPlease complete the login in your browser.\n\nThe app will automatically detect when you're authenticated.")
                 } else {
                     // Process died quickly - check for error
-                    let outputData = try? outputPipe.fileHandleForReading.readDataToEndOfFile()
-                    let errorData = try? errorPipe.fileHandleForReading.readDataToEndOfFile()
+                    let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
+                    let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
 
-                    var output = String(data: outputData ?? Data(), encoding: .utf8) ?? ""
+                    var output = String(data: outputData, encoding: .utf8) ?? ""
                     if output.isEmpty { output = capture.text }
-                    let error = String(data: errorData ?? Data(), encoding: .utf8) ?? ""
+                    let error = String(data: errorData, encoding: .utf8) ?? ""
 
                     NSLog("[Auth] Process died quickly - output: %@", output.isEmpty ? "(empty)" : String(output.prefix(200)))
 
