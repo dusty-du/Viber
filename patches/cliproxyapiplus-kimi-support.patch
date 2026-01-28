@@ -1,0 +1,1471 @@
+diff --git a/cmd/server/main.go b/cmd/server/main.go
+index d0f70f6..553f0ba 100644
+--- a/cmd/server/main.go
++++ b/cmd/server/main.go
+@@ -72,6 +72,7 @@ func main() {
+ 	var codexLogin bool
+ 	var claudeLogin bool
+ 	var qwenLogin bool
++	var kimiLogin bool
+ 	var iflowLogin bool
+ 	var iflowCookie bool
+ 	var noBrowser bool
+@@ -95,6 +96,7 @@ func main() {
+ 	flag.BoolVar(&codexLogin, "codex-login", false, "Login to Codex using OAuth")
+ 	flag.BoolVar(&claudeLogin, "claude-login", false, "Login to Claude using OAuth")
+ 	flag.BoolVar(&qwenLogin, "qwen-login", false, "Login to Qwen using OAuth")
++	flag.BoolVar(&kimiLogin, "kimi-login", false, "Login to Kimi (Moonshot AI) using OAuth device flow")
+ 	flag.BoolVar(&iflowLogin, "iflow-login", false, "Login to iFlow using OAuth")
+ 	flag.BoolVar(&iflowCookie, "iflow-cookie", false, "Login to iFlow using Cookie")
+ 	flag.BoolVar(&noBrowser, "no-browser", false, "Don't open browser automatically for OAuth")
+@@ -497,6 +499,8 @@ func main() {
+ 		cmd.DoClaudeLogin(cfg, options)
+ 	} else if qwenLogin {
+ 		cmd.DoQwenLogin(cfg, options)
++	} else if kimiLogin {
++		cmd.DoKimiLogin(cfg, options)
+ 	} else if iflowLogin {
+ 		cmd.DoIFlowLogin(cfg, options)
+ 	} else if iflowCookie {
+diff --git a/internal/auth/kimi/kimi.go b/internal/auth/kimi/kimi.go
+new file mode 100644
+index 0000000..c9da7c9
+--- /dev/null
++++ b/internal/auth/kimi/kimi.go
+@@ -0,0 +1,407 @@
++// Package kimi provides authentication and token management for Kimi (Moonshot AI) API.
++// It handles the RFC 8628 OAuth2 Device Authorization Grant flow for secure authentication.
++package kimi
++
++import (
++	"context"
++	"encoding/json"
++	"fmt"
++	"io"
++	"net/http"
++	"net/url"
++	"os"
++	"runtime"
++	"strings"
++	"time"
++
++	"github.com/google/uuid"
++	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
++	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
++	log "github.com/sirupsen/logrus"
++)
++
++const (
++	// kimiClientID is Kimi Code's OAuth client ID.
++	kimiClientID = "17e5f671-d194-4dfb-9706-5516cb48c098"
++	// kimiOAuthHost is the OAuth server endpoint.
++	kimiOAuthHost = "https://auth.kimi.com"
++	// kimiDeviceCodeURL is the endpoint for requesting device codes.
++	kimiDeviceCodeURL = kimiOAuthHost + "/api/oauth/device_authorization"
++	// kimiTokenURL is the endpoint for exchanging device codes for tokens.
++	kimiTokenURL = kimiOAuthHost + "/api/oauth/token"
++	// kimiAPIBaseURL is the base URL for Kimi API requests.
++	kimiAPIBaseURL = "https://api.kimi.com/coding/v1"
++	// defaultPollInterval is the default interval for polling token endpoint.
++	defaultPollInterval = 5 * time.Second
++	// maxPollDuration is the maximum time to wait for user authorization.
++	maxPollDuration = 15 * time.Minute
++	// refreshThresholdSeconds is when to refresh token before expiry (5 minutes).
++	refreshThresholdSeconds = 300
++)
++
++// KimiAuth handles Kimi authentication flow.
++type KimiAuth struct {
++	httpClient   *http.Client
++	deviceClient *DeviceFlowClient
++	cfg          *config.Config
++}
++
++// NewKimiAuth creates a new KimiAuth service instance.
++func NewKimiAuth(cfg *config.Config) *KimiAuth {
++	return &KimiAuth{
++		httpClient:   util.SetProxy(&cfg.SDKConfig, &http.Client{Timeout: 30 * time.Second}),
++		deviceClient: NewDeviceFlowClient(cfg),
++		cfg:          cfg,
++	}
++}
++
++// StartDeviceFlow initiates the device flow authentication.
++func (k *KimiAuth) StartDeviceFlow(ctx context.Context) (*DeviceCodeResponse, error) {
++	return k.deviceClient.RequestDeviceCode(ctx)
++}
++
++// WaitForAuthorization polls for user authorization and returns the auth bundle.
++func (k *KimiAuth) WaitForAuthorization(ctx context.Context, deviceCode *DeviceCodeResponse) (*KimiAuthBundle, error) {
++	tokenData, err := k.deviceClient.PollForToken(ctx, deviceCode)
++	if err != nil {
++		return nil, err
++	}
++
++	return &KimiAuthBundle{
++		TokenData: tokenData,
++	}, nil
++}
++
++// CreateTokenStorage creates a new KimiTokenStorage from auth bundle.
++func (k *KimiAuth) CreateTokenStorage(bundle *KimiAuthBundle) *KimiTokenStorage {
++	expiresAt := ""
++	if bundle.TokenData.ExpiresAt > 0 {
++		expiresAt = time.Unix(int64(bundle.TokenData.ExpiresAt), 0).UTC().Format(time.RFC3339)
++	}
++	return &KimiTokenStorage{
++		AccessToken:  bundle.TokenData.AccessToken,
++		RefreshToken: bundle.TokenData.RefreshToken,
++		TokenType:    bundle.TokenData.TokenType,
++		Scope:        bundle.TokenData.Scope,
++		ExpiresAt:    expiresAt,
++		Type:         "kimi",
++	}
++}
++
++// DeviceFlowClient handles the OAuth2 device flow for Kimi.
++type DeviceFlowClient struct {
++	httpClient *http.Client
++	cfg        *config.Config
++	deviceID   string
++}
++
++// NewDeviceFlowClient creates a new device flow client.
++func NewDeviceFlowClient(cfg *config.Config) *DeviceFlowClient {
++	client := &http.Client{Timeout: 30 * time.Second}
++	if cfg != nil {
++		client = util.SetProxy(&cfg.SDKConfig, client)
++	}
++	return &DeviceFlowClient{
++		httpClient: client,
++		cfg:        cfg,
++		deviceID:   getOrCreateDeviceID(),
++	}
++}
++
++// getOrCreateDeviceID returns a stable device ID.
++func getOrCreateDeviceID() string {
++	homeDir, err := os.UserHomeDir()
++	if err != nil {
++		return uuid.New().String()
++	}
++	deviceIDPath := homeDir + "/.cli-proxy-api/kimi-device-id"
++
++	// Try to read existing device ID
++	if data, err := os.ReadFile(deviceIDPath); err == nil {
++		return strings.TrimSpace(string(data))
++	}
++
++	// Create new device ID
++	deviceID := uuid.New().String()
++	_ = os.MkdirAll(homeDir+"/.cli-proxy-api", 0700)
++	_ = os.WriteFile(deviceIDPath, []byte(deviceID), 0600)
++	return deviceID
++}
++
++// getDeviceModel returns a device model string.
++func getDeviceModel() string {
++	osName := runtime.GOOS
++	arch := runtime.GOARCH
++
++	switch osName {
++	case "darwin":
++		return fmt.Sprintf("macOS %s", arch)
++	case "windows":
++		return fmt.Sprintf("Windows %s", arch)
++	case "linux":
++		return fmt.Sprintf("Linux %s", arch)
++	default:
++		return fmt.Sprintf("%s %s", osName, arch)
++	}
++}
++
++// getHostname returns the machine hostname.
++func getHostname() string {
++	hostname, err := os.Hostname()
++	if err != nil {
++		return "unknown"
++	}
++	return hostname
++}
++
++// commonHeaders returns headers required for Kimi API requests.
++func (c *DeviceFlowClient) commonHeaders() map[string]string {
++	return map[string]string{
++		"X-Msh-Platform":     "cli-proxy-api",
++		"X-Msh-Version":      "1.0.0",
++		"X-Msh-Device-Name":  getHostname(),
++		"X-Msh-Device-Model": getDeviceModel(),
++		"X-Msh-Device-Id":    c.deviceID,
++	}
++}
++
++// RequestDeviceCode initiates the device flow by requesting a device code from Kimi.
++func (c *DeviceFlowClient) RequestDeviceCode(ctx context.Context) (*DeviceCodeResponse, error) {
++	data := url.Values{}
++	data.Set("client_id", kimiClientID)
++
++	req, err := http.NewRequestWithContext(ctx, http.MethodPost, kimiDeviceCodeURL, strings.NewReader(data.Encode()))
++	if err != nil {
++		return nil, fmt.Errorf("kimi: failed to create device code request: %w", err)
++	}
++	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
++	req.Header.Set("Accept", "application/json")
++	for k, v := range c.commonHeaders() {
++		req.Header.Set(k, v)
++	}
++
++	resp, err := c.httpClient.Do(req)
++	if err != nil {
++		return nil, fmt.Errorf("kimi: device code request failed: %w", err)
++	}
++	defer func() {
++		if errClose := resp.Body.Close(); errClose != nil {
++			log.Errorf("kimi device code: close body error: %v", errClose)
++		}
++	}()
++
++	bodyBytes, err := io.ReadAll(resp.Body)
++	if err != nil {
++		return nil, fmt.Errorf("kimi: failed to read device code response: %w", err)
++	}
++
++	if resp.StatusCode != http.StatusOK {
++		return nil, fmt.Errorf("kimi: device code request failed with status %d: %s", resp.StatusCode, string(bodyBytes))
++	}
++
++	var deviceCode DeviceCodeResponse
++	if err = json.Unmarshal(bodyBytes, &deviceCode); err != nil {
++		return nil, fmt.Errorf("kimi: failed to parse device code response: %w", err)
++	}
++
++	return &deviceCode, nil
++}
++
++// PollForToken polls the token endpoint until the user authorizes or the device code expires.
++func (c *DeviceFlowClient) PollForToken(ctx context.Context, deviceCode *DeviceCodeResponse) (*KimiTokenData, error) {
++	if deviceCode == nil {
++		return nil, fmt.Errorf("kimi: device code is nil")
++	}
++
++	interval := time.Duration(deviceCode.Interval) * time.Second
++	if interval < defaultPollInterval {
++		interval = defaultPollInterval
++	}
++
++	deadline := time.Now().Add(maxPollDuration)
++	if deviceCode.ExpiresIn > 0 {
++		codeDeadline := time.Now().Add(time.Duration(deviceCode.ExpiresIn) * time.Second)
++		if codeDeadline.Before(deadline) {
++			deadline = codeDeadline
++		}
++	}
++
++	ticker := time.NewTicker(interval)
++	defer ticker.Stop()
++
++	for {
++		select {
++		case <-ctx.Done():
++			return nil, fmt.Errorf("kimi: context cancelled: %w", ctx.Err())
++		case <-ticker.C:
++			if time.Now().After(deadline) {
++				return nil, fmt.Errorf("kimi: device code expired")
++			}
++
++			token, pollErr, shouldContinue := c.exchangeDeviceCode(ctx, deviceCode.DeviceCode)
++			if token != nil {
++				return token, nil
++			}
++			if !shouldContinue {
++				return nil, pollErr
++			}
++			// Continue polling
++		}
++	}
++}
++
++// exchangeDeviceCode attempts to exchange the device code for an access token.
++// Returns (token, error, shouldContinue).
++func (c *DeviceFlowClient) exchangeDeviceCode(ctx context.Context, deviceCode string) (*KimiTokenData, error, bool) {
++	data := url.Values{}
++	data.Set("client_id", kimiClientID)
++	data.Set("device_code", deviceCode)
++	data.Set("grant_type", "urn:ietf:params:oauth:grant-type:device_code")
++
++	req, err := http.NewRequestWithContext(ctx, http.MethodPost, kimiTokenURL, strings.NewReader(data.Encode()))
++	if err != nil {
++		return nil, fmt.Errorf("kimi: failed to create token request: %w", err), false
++	}
++	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
++	req.Header.Set("Accept", "application/json")
++	for k, v := range c.commonHeaders() {
++		req.Header.Set(k, v)
++	}
++
++	resp, err := c.httpClient.Do(req)
++	if err != nil {
++		return nil, fmt.Errorf("kimi: token request failed: %w", err), false
++	}
++	defer func() {
++		if errClose := resp.Body.Close(); errClose != nil {
++			log.Errorf("kimi token exchange: close body error: %v", errClose)
++		}
++	}()
++
++	bodyBytes, err := io.ReadAll(resp.Body)
++	if err != nil {
++		return nil, fmt.Errorf("kimi: failed to read token response: %w", err), false
++	}
++
++	// Parse response - Kimi returns 200 for both success and pending states
++	var oauthResp struct {
++		Error            string  `json:"error"`
++		ErrorDescription string  `json:"error_description"`
++		AccessToken      string  `json:"access_token"`
++		RefreshToken     string  `json:"refresh_token"`
++		TokenType        string  `json:"token_type"`
++		ExpiresIn        float64 `json:"expires_in"`
++		Scope            string  `json:"scope"`
++	}
++
++	if err = json.Unmarshal(bodyBytes, &oauthResp); err != nil {
++		return nil, fmt.Errorf("kimi: failed to parse token response: %w", err), false
++	}
++
++	if oauthResp.Error != "" {
++		switch oauthResp.Error {
++		case "authorization_pending":
++			return nil, nil, true // Continue polling
++		case "slow_down":
++			return nil, nil, true // Continue polling (with increased interval handled by caller)
++		case "expired_token":
++			return nil, fmt.Errorf("kimi: device code expired"), false
++		case "access_denied":
++			return nil, fmt.Errorf("kimi: access denied by user"), false
++		default:
++			return nil, fmt.Errorf("kimi: OAuth error: %s - %s", oauthResp.Error, oauthResp.ErrorDescription), false
++		}
++	}
++
++	if oauthResp.AccessToken == "" {
++		return nil, fmt.Errorf("kimi: empty access token in response"), false
++	}
++
++	expiresAt := float64(0)
++	if oauthResp.ExpiresIn > 0 {
++		expiresAt = float64(time.Now().Unix()) + oauthResp.ExpiresIn
++	}
++
++	return &KimiTokenData{
++		AccessToken:  oauthResp.AccessToken,
++		RefreshToken: oauthResp.RefreshToken,
++		TokenType:    oauthResp.TokenType,
++		ExpiresAt:    expiresAt,
++		Scope:        oauthResp.Scope,
++	}, nil, false
++}
++
++// RefreshToken exchanges a refresh token for a new access token.
++func (c *DeviceFlowClient) RefreshToken(ctx context.Context, refreshToken string) (*KimiTokenData, error) {
++	data := url.Values{}
++	data.Set("client_id", kimiClientID)
++	data.Set("grant_type", "refresh_token")
++	data.Set("refresh_token", refreshToken)
++
++	req, err := http.NewRequestWithContext(ctx, http.MethodPost, kimiTokenURL, strings.NewReader(data.Encode()))
++	if err != nil {
++		return nil, fmt.Errorf("kimi: failed to create refresh request: %w", err)
++	}
++	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
++	req.Header.Set("Accept", "application/json")
++	for k, v := range c.commonHeaders() {
++		req.Header.Set(k, v)
++	}
++
++	resp, err := c.httpClient.Do(req)
++	if err != nil {
++		return nil, fmt.Errorf("kimi: refresh request failed: %w", err)
++	}
++	defer func() {
++		if errClose := resp.Body.Close(); errClose != nil {
++			log.Errorf("kimi refresh token: close body error: %v", errClose)
++		}
++	}()
++
++	bodyBytes, err := io.ReadAll(resp.Body)
++	if err != nil {
++		return nil, fmt.Errorf("kimi: failed to read refresh response: %w", err)
++	}
++
++	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
++		return nil, fmt.Errorf("kimi: refresh token rejected (status %d)", resp.StatusCode)
++	}
++
++	if resp.StatusCode != http.StatusOK {
++		return nil, fmt.Errorf("kimi: refresh failed with status %d: %s", resp.StatusCode, string(bodyBytes))
++	}
++
++	var tokenResp struct {
++		AccessToken  string  `json:"access_token"`
++		RefreshToken string  `json:"refresh_token"`
++		TokenType    string  `json:"token_type"`
++		ExpiresIn    float64 `json:"expires_in"`
++		Scope        string  `json:"scope"`
++	}
++
++	if err = json.Unmarshal(bodyBytes, &tokenResp); err != nil {
++		return nil, fmt.Errorf("kimi: failed to parse refresh response: %w", err)
++	}
++
++	if tokenResp.AccessToken == "" {
++		return nil, fmt.Errorf("kimi: empty access token in refresh response")
++	}
++
++	expiresAt := float64(0)
++	if tokenResp.ExpiresIn > 0 {
++		expiresAt = float64(time.Now().Unix()) + tokenResp.ExpiresIn
++	}
++
++	return &KimiTokenData{
++		AccessToken:  tokenResp.AccessToken,
++		RefreshToken: tokenResp.RefreshToken,
++		TokenType:    tokenResp.TokenType,
++		ExpiresAt:    expiresAt,
++		Scope:        tokenResp.Scope,
++	}, nil
++}
++
++// isHTTPSuccess checks if the status code indicates success (2xx).
++func isHTTPSuccess(statusCode int) bool {
++	return statusCode >= 200 && statusCode < 300
++}
+diff --git a/internal/auth/kimi/token.go b/internal/auth/kimi/token.go
+new file mode 100644
+index 0000000..fc8558e
+--- /dev/null
++++ b/internal/auth/kimi/token.go
+@@ -0,0 +1,125 @@
++// Package kimi provides authentication and token management functionality
++// for Kimi (Moonshot AI) services. It handles OAuth2 device flow token storage,
++// serialization, and retrieval for maintaining authenticated sessions with the Kimi API.
++package kimi
++
++import (
++	"encoding/json"
++	"fmt"
++	"os"
++	"path/filepath"
++	"time"
++
++	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
++)
++
++// KimiTokenStorage stores OAuth2 token information for Kimi API authentication.
++type KimiTokenStorage struct {
++	// AccessToken is the OAuth2 access token used for authenticating API requests.
++	AccessToken string `json:"access_token"`
++	// RefreshToken is the OAuth2 refresh token used to obtain new access tokens.
++	RefreshToken string `json:"refresh_token"`
++	// TokenType is the type of token, typically "Bearer".
++	TokenType string `json:"token_type"`
++	// Scope is the OAuth2 scope granted to the token.
++	Scope string `json:"scope,omitempty"`
++	// ExpiresAt is the RFC3339 timestamp when the access token expires.
++	ExpiresAt string `json:"expires_at,omitempty"`
++	// Expired is the RFC3339 timestamp when the access token expires (alternative field name for compatibility).
++	Expired string `json:"expired,omitempty"`
++	// Type indicates the authentication provider type, always "kimi" for this storage.
++	Type string `json:"type"`
++}
++
++// KimiTokenData holds the raw OAuth token response from Kimi.
++type KimiTokenData struct {
++	// AccessToken is the OAuth2 access token.
++	AccessToken string `json:"access_token"`
++	// RefreshToken is the OAuth2 refresh token.
++	RefreshToken string `json:"refresh_token"`
++	// TokenType is the type of token, typically "Bearer".
++	TokenType string `json:"token_type"`
++	// ExpiresAt is the Unix timestamp when the token expires.
++	ExpiresAt float64 `json:"expires_at"`
++	// Scope is the OAuth2 scope granted to the token.
++	Scope string `json:"scope"`
++}
++
++// KimiAuthBundle bundles authentication data for storage.
++type KimiAuthBundle struct {
++	// TokenData contains the OAuth token information.
++	TokenData *KimiTokenData
++}
++
++// DeviceCodeResponse represents Kimi's device code response.
++type DeviceCodeResponse struct {
++	// DeviceCode is the device verification code.
++	DeviceCode string `json:"device_code"`
++	// UserCode is the code the user must enter at the verification URI.
++	UserCode string `json:"user_code"`
++	// VerificationURI is the URL where the user should enter the code.
++	VerificationURI string `json:"verification_uri,omitempty"`
++	// VerificationURIComplete is the URL with the code pre-filled.
++	VerificationURIComplete string `json:"verification_uri_complete"`
++	// ExpiresIn is the number of seconds until the device code expires.
++	ExpiresIn int `json:"expires_in"`
++	// Interval is the minimum number of seconds to wait between polling requests.
++	Interval int `json:"interval"`
++}
++
++// SaveTokenToFile serializes the Kimi token storage to a JSON file.
++func (ts *KimiTokenStorage) SaveTokenToFile(authFilePath string) error {
++	misc.LogSavingCredentials(authFilePath)
++	ts.Type = "kimi"
++
++	// Set expired field for compatibility with VibeProxy auth scanning
++	if ts.ExpiresAt != "" && ts.Expired == "" {
++		ts.Expired = ts.ExpiresAt
++	}
++
++	if err := os.MkdirAll(filepath.Dir(authFilePath), 0700); err != nil {
++		return fmt.Errorf("failed to create directory: %v", err)
++	}
++
++	f, err := os.Create(authFilePath)
++	if err != nil {
++		return fmt.Errorf("failed to create token file: %w", err)
++	}
++	defer func() {
++		_ = f.Close()
++	}()
++
++	encoder := json.NewEncoder(f)
++	encoder.SetIndent("", "  ")
++	if err = encoder.Encode(ts); err != nil {
++		return fmt.Errorf("failed to write token to file: %w", err)
++	}
++	return nil
++}
++
++// IsExpired checks if the token has expired.
++func (ts *KimiTokenStorage) IsExpired() bool {
++	expiresAtStr := ts.ExpiresAt
++	if expiresAtStr == "" {
++		expiresAtStr = ts.Expired
++	}
++	if expiresAtStr == "" {
++		return false // No expiry set, assume valid
++	}
++
++	expiresAt, err := time.Parse(time.RFC3339, expiresAtStr)
++	if err != nil {
++		return true // Can't parse, assume expired
++	}
++
++	// Consider expired if within refresh threshold
++	return time.Now().Add(time.Duration(refreshThresholdSeconds) * time.Second).After(expiresAt)
++}
++
++// NeedsRefresh checks if the token should be refreshed.
++func (ts *KimiTokenStorage) NeedsRefresh() bool {
++	if ts.RefreshToken == "" {
++		return false // Can't refresh without refresh token
++	}
++	return ts.IsExpired()
++}
+diff --git a/internal/cmd/auth_manager.go b/internal/cmd/auth_manager.go
+index 84d9b96..e983fff 100644
+--- a/internal/cmd/auth_manager.go
++++ b/internal/cmd/auth_manager.go
+@@ -6,7 +6,7 @@ import (
+ 
+ // newAuthManager creates a new authentication manager instance with all supported
+ // authenticators and a file-based token store. It initializes authenticators for
+-// Gemini, Codex, Claude, Qwen, IFlow, Antigravity, and GitHub Copilot providers.
++// Gemini, Codex, Claude, Qwen, IFlow, Antigravity, Kimi, and GitHub Copilot providers.
+ //
+ // Returns:
+ //   - *sdkAuth.Manager: A configured authentication manager instance
+@@ -20,6 +20,7 @@ func newAuthManager() *sdkAuth.Manager {
+ 		sdkAuth.NewIFlowAuthenticator(),
+ 		sdkAuth.NewAntigravityAuthenticator(),
+ 		sdkAuth.NewKiroAuthenticator(),
++		sdkAuth.NewKimiAuthenticator(),
+ 		sdkAuth.NewGitHubCopilotAuthenticator(),
+ 	)
+ 	return manager
+diff --git a/internal/cmd/kimi_login.go b/internal/cmd/kimi_login.go
+new file mode 100644
+index 0000000..eb5f11f
+--- /dev/null
++++ b/internal/cmd/kimi_login.go
+@@ -0,0 +1,44 @@
++package cmd
++
++import (
++	"context"
++	"fmt"
++
++	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
++	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
++	log "github.com/sirupsen/logrus"
++)
++
++// DoKimiLogin triggers the OAuth device flow for Kimi (Moonshot AI) and saves tokens.
++// It initiates the device flow authentication, displays the verification URL for the user,
++// and waits for authorization before saving the tokens.
++//
++// Parameters:
++//   - cfg: The application configuration containing proxy and auth directory settings
++//   - options: Login options including browser behavior settings
++func DoKimiLogin(cfg *config.Config, options *LoginOptions) {
++	if options == nil {
++		options = &LoginOptions{}
++	}
++
++	manager := newAuthManager()
++	authOpts := &sdkAuth.LoginOptions{
++		NoBrowser: options.NoBrowser,
++		Metadata:  map[string]string{},
++		Prompt:    options.Prompt,
++	}
++
++	record, savedPath, err := manager.Login(context.Background(), "kimi", cfg, authOpts)
++	if err != nil {
++		log.Errorf("Kimi authentication failed: %v", err)
++		return
++	}
++
++	if savedPath != "" {
++		fmt.Printf("Authentication saved to %s\n", savedPath)
++	}
++	if record != nil && record.Label != "" {
++		fmt.Printf("Authenticated as %s\n", record.Label)
++	}
++	fmt.Println("Kimi authentication successful!")
++}
+diff --git a/internal/registry/model_definitions_static_data.go b/internal/registry/model_definitions_static_data.go
+index b1a524f..63dce52 100644
+--- a/internal/registry/model_definitions_static_data.go
++++ b/internal/registry/model_definitions_static_data.go
+@@ -719,6 +719,47 @@ func GetOpenAIModels() []*ModelInfo {
+ 	}
+ }
+ 
++// GetKimiModels returns the standard Kimi (Moonshot AI) model definitions
++func GetKimiModels() []*ModelInfo {
++	return []*ModelInfo{
++		{
++			ID:                  "kimi-k2",
++			Object:              "model",
++			Created:             1752192000, // 2025-07-11
++			OwnedBy:             "moonshot",
++			Type:                "kimi",
++			DisplayName:         "Kimi K2",
++			Description:         "Kimi K2 - Moonshot AI's flagship coding model",
++			ContextLength:       131072,
++			MaxCompletionTokens: 32768,
++		},
++		{
++			ID:                  "kimi-k2-thinking",
++			Object:              "model",
++			Created:             1762387200, // 2025-11-06
++			OwnedBy:             "moonshot",
++			Type:                "kimi",
++			DisplayName:         "Kimi K2 Thinking",
++			Description:         "Kimi K2 Thinking - Extended reasoning model",
++			ContextLength:       131072,
++			MaxCompletionTokens: 32768,
++			Thinking:            &ThinkingSupport{Min: 1024, Max: 32000, ZeroAllowed: true, DynamicAllowed: true},
++		},
++		{
++			ID:                  "kimi-k2.5",
++			Object:              "model",
++			Created:             1769472000, // 2026-01-26
++			OwnedBy:             "moonshot",
++			Type:                "kimi",
++			DisplayName:         "Kimi K2.5",
++			Description:         "Kimi K2.5 - Latest Moonshot AI coding model with improved capabilities",
++			ContextLength:       131072,
++			MaxCompletionTokens: 32768,
++			Thinking:            &ThinkingSupport{Min: 1024, Max: 32000, ZeroAllowed: true, DynamicAllowed: true},
++		},
++	}
++}
++
+ // GetQwenModels returns the standard Qwen model definitions
+ func GetQwenModels() []*ModelInfo {
+ 	return []*ModelInfo{
+diff --git a/internal/runtime/executor/kimi_executor.go b/internal/runtime/executor/kimi_executor.go
+new file mode 100644
+index 0000000..dd21b3d
+--- /dev/null
++++ b/internal/runtime/executor/kimi_executor.go
+@@ -0,0 +1,413 @@
++package executor
++
++import (
++	"bufio"
++	"bytes"
++	"context"
++	"fmt"
++	"io"
++	"net/http"
++	"os"
++	"path/filepath"
++	"runtime"
++	"strings"
++	"time"
++
++	kimiauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/kimi"
++	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
++	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
++	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
++	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
++	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
++	log "github.com/sirupsen/logrus"
++	"github.com/tidwall/sjson"
++)
++
++const (
++	// kimiAPIBaseURL is the Kimi API endpoint for chat completions.
++	kimiAPIBaseURL = "https://api.kimi.com/coding/v1"
++)
++
++// KimiExecutor is a stateless executor for Kimi API using OpenAI-compatible chat completions.
++type KimiExecutor struct {
++	cfg *config.Config
++}
++
++// NewKimiExecutor creates a new Kimi executor.
++func NewKimiExecutor(cfg *config.Config) *KimiExecutor { return &KimiExecutor{cfg: cfg} }
++
++// Identifier returns the executor identifier.
++func (e *KimiExecutor) Identifier() string { return "kimi" }
++
++// PrepareRequest injects Kimi credentials into the outgoing HTTP request.
++func (e *KimiExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.Auth) error {
++	if req == nil {
++		return nil
++	}
++	token := kimiCreds(auth)
++	if strings.TrimSpace(token) != "" {
++		req.Header.Set("Authorization", "Bearer "+token)
++	}
++	return nil
++}
++
++// HttpRequest injects Kimi credentials into the request and executes it.
++func (e *KimiExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Auth, req *http.Request) (*http.Response, error) {
++	if req == nil {
++		return nil, fmt.Errorf("kimi executor: request is nil")
++	}
++	if ctx == nil {
++		ctx = req.Context()
++	}
++	httpReq := req.WithContext(ctx)
++	if err := e.PrepareRequest(httpReq, auth); err != nil {
++		return nil, err
++	}
++	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
++	return httpClient.Do(httpReq)
++}
++
++// Execute performs a non-streaming chat completion request to Kimi.
++func (e *KimiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
++	baseModel := thinking.ParseSuffix(req.Model).ModelName
++
++	token := kimiCreds(auth)
++
++	reporter := newUsageReporter(ctx, e.Identifier(), baseModel, auth)
++	defer reporter.trackFailure(ctx, &err)
++
++	from := opts.SourceFormat
++	to := sdktranslator.FromString("openai")
++	originalPayload := bytes.Clone(req.Payload)
++	if len(opts.OriginalRequest) > 0 {
++		originalPayload = bytes.Clone(opts.OriginalRequest)
++	}
++	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, false)
++	body := sdktranslator.TranslateRequest(from, to, baseModel, bytes.Clone(req.Payload), false)
++
++	// Strip kimi- prefix for upstream API
++	upstreamModel := stripKimiPrefix(baseModel)
++	body, _ = sjson.SetBytes(body, "model", upstreamModel)
++
++	body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier())
++	if err != nil {
++		return resp, err
++	}
++
++	requestedModel := payloadRequestedModel(opts, req.Model)
++	body = applyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
++
++	url := kimiAPIBaseURL + "/chat/completions"
++	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
++	if err != nil {
++		return resp, err
++	}
++	applyKimiHeaders(httpReq, token, false)
++	var authID, authLabel, authType, authValue string
++	if auth != nil {
++		authID = auth.ID
++		authLabel = auth.Label
++		authType, authValue = auth.AccountInfo()
++	}
++	recordAPIRequest(ctx, e.cfg, upstreamRequestLog{
++		URL:       url,
++		Method:    http.MethodPost,
++		Headers:   httpReq.Header.Clone(),
++		Body:      body,
++		Provider:  e.Identifier(),
++		AuthID:    authID,
++		AuthLabel: authLabel,
++		AuthType:  authType,
++		AuthValue: authValue,
++	})
++
++	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
++	httpResp, err := httpClient.Do(httpReq)
++	if err != nil {
++		recordAPIResponseError(ctx, e.cfg, err)
++		return resp, err
++	}
++	defer func() {
++		if errClose := httpResp.Body.Close(); errClose != nil {
++			log.Errorf("kimi executor: close response body error: %v", errClose)
++		}
++	}()
++	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
++	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
++		b, _ := io.ReadAll(httpResp.Body)
++		appendAPIResponseChunk(ctx, e.cfg, b)
++		logWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
++		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
++		return resp, err
++	}
++	data, err := io.ReadAll(httpResp.Body)
++	if err != nil {
++		recordAPIResponseError(ctx, e.cfg, err)
++		return resp, err
++	}
++	appendAPIResponseChunk(ctx, e.cfg, data)
++	reporter.publish(ctx, parseOpenAIUsage(data))
++	var param any
++	// Note: TranslateNonStream uses req.Model (original with suffix) to preserve
++	// the original model name in the response for client compatibility.
++	out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, bytes.Clone(opts.OriginalRequest), body, data, &param)
++	resp = cliproxyexecutor.Response{Payload: []byte(out)}
++	return resp, nil
++}
++
++// ExecuteStream performs a streaming chat completion request to Kimi.
++func (e *KimiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (stream <-chan cliproxyexecutor.StreamChunk, err error) {
++	baseModel := thinking.ParseSuffix(req.Model).ModelName
++
++	token := kimiCreds(auth)
++
++	reporter := newUsageReporter(ctx, e.Identifier(), baseModel, auth)
++	defer reporter.trackFailure(ctx, &err)
++
++	from := opts.SourceFormat
++	to := sdktranslator.FromString("openai")
++	originalPayload := bytes.Clone(req.Payload)
++	if len(opts.OriginalRequest) > 0 {
++		originalPayload = bytes.Clone(opts.OriginalRequest)
++	}
++	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, true)
++	body := sdktranslator.TranslateRequest(from, to, baseModel, bytes.Clone(req.Payload), true)
++
++	// Strip kimi- prefix for upstream API
++	upstreamModel := stripKimiPrefix(baseModel)
++	body, _ = sjson.SetBytes(body, "model", upstreamModel)
++
++	body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier())
++	if err != nil {
++		return nil, err
++	}
++
++	body, _ = sjson.SetBytes(body, "stream_options.include_usage", true)
++	requestedModel := payloadRequestedModel(opts, req.Model)
++	body = applyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
++
++	url := kimiAPIBaseURL + "/chat/completions"
++	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
++	if err != nil {
++		return nil, err
++	}
++	applyKimiHeaders(httpReq, token, true)
++	var authID, authLabel, authType, authValue string
++	if auth != nil {
++		authID = auth.ID
++		authLabel = auth.Label
++		authType, authValue = auth.AccountInfo()
++	}
++	recordAPIRequest(ctx, e.cfg, upstreamRequestLog{
++		URL:       url,
++		Method:    http.MethodPost,
++		Headers:   httpReq.Header.Clone(),
++		Body:      body,
++		Provider:  e.Identifier(),
++		AuthID:    authID,
++		AuthLabel: authLabel,
++		AuthType:  authType,
++		AuthValue: authValue,
++	})
++
++	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
++	httpResp, err := httpClient.Do(httpReq)
++	if err != nil {
++		recordAPIResponseError(ctx, e.cfg, err)
++		return nil, err
++	}
++	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
++	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
++		b, _ := io.ReadAll(httpResp.Body)
++		appendAPIResponseChunk(ctx, e.cfg, b)
++		logWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
++		if errClose := httpResp.Body.Close(); errClose != nil {
++			log.Errorf("kimi executor: close response body error: %v", errClose)
++		}
++		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
++		return nil, err
++	}
++	out := make(chan cliproxyexecutor.StreamChunk)
++	stream = out
++	go func() {
++		defer close(out)
++		defer func() {
++			if errClose := httpResp.Body.Close(); errClose != nil {
++				log.Errorf("kimi executor: close response body error: %v", errClose)
++			}
++		}()
++		scanner := bufio.NewScanner(httpResp.Body)
++		scanner.Buffer(nil, 52_428_800) // 50MB
++		var param any
++		for scanner.Scan() {
++			line := scanner.Bytes()
++			appendAPIResponseChunk(ctx, e.cfg, line)
++			if detail, ok := parseOpenAIStreamUsage(line); ok {
++				reporter.publish(ctx, detail)
++			}
++			chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, bytes.Clone(opts.OriginalRequest), body, bytes.Clone(line), &param)
++			for i := range chunks {
++				out <- cliproxyexecutor.StreamChunk{Payload: []byte(chunks[i])}
++			}
++		}
++		doneChunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, bytes.Clone(opts.OriginalRequest), body, bytes.Clone([]byte("[DONE]")), &param)
++		for i := range doneChunks {
++			out <- cliproxyexecutor.StreamChunk{Payload: []byte(doneChunks[i])}
++		}
++		if errScan := scanner.Err(); errScan != nil {
++			recordAPIResponseError(ctx, e.cfg, errScan)
++			reporter.publishFailure(ctx)
++			out <- cliproxyexecutor.StreamChunk{Err: errScan}
++		}
++	}()
++	return stream, nil
++}
++
++// CountTokens estimates token count for Kimi requests.
++func (e *KimiExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
++	baseModel := thinking.ParseSuffix(req.Model).ModelName
++
++	from := opts.SourceFormat
++	to := sdktranslator.FromString("openai")
++	body := sdktranslator.TranslateRequest(from, to, baseModel, bytes.Clone(req.Payload), false)
++
++	// Use a generic tokenizer for estimation
++	enc, err := tokenizerForModel("gpt-4")
++	if err != nil {
++		return cliproxyexecutor.Response{}, fmt.Errorf("kimi executor: tokenizer init failed: %w", err)
++	}
++
++	count, err := countOpenAIChatTokens(enc, body)
++	if err != nil {
++		return cliproxyexecutor.Response{}, fmt.Errorf("kimi executor: token counting failed: %w", err)
++	}
++
++	usageJSON := buildOpenAIUsageJSON(count)
++	translated := sdktranslator.TranslateTokenCount(ctx, to, from, count, usageJSON)
++	return cliproxyexecutor.Response{Payload: []byte(translated)}, nil
++}
++
++// Refresh refreshes the Kimi token using the refresh token.
++func (e *KimiExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
++	log.Debugf("kimi executor: refresh called")
++	if auth == nil {
++		return nil, fmt.Errorf("kimi executor: auth is nil")
++	}
++	// Expect refresh_token in metadata for OAuth-based accounts
++	var refreshToken string
++	if auth.Metadata != nil {
++		if v, ok := auth.Metadata["refresh_token"].(string); ok && strings.TrimSpace(v) != "" {
++			refreshToken = v
++		}
++	}
++	if strings.TrimSpace(refreshToken) == "" {
++		// Nothing to refresh
++		return auth, nil
++	}
++
++	client := kimiauth.NewDeviceFlowClient(e.cfg)
++	td, err := client.RefreshToken(ctx, refreshToken)
++	if err != nil {
++		return nil, err
++	}
++	if auth.Metadata == nil {
++		auth.Metadata = make(map[string]any)
++	}
++	auth.Metadata["access_token"] = td.AccessToken
++	if td.RefreshToken != "" {
++		auth.Metadata["refresh_token"] = td.RefreshToken
++	}
++	// Use "expired" for consistency with existing file format
++	if td.ExpiresAt > 0 {
++		auth.Metadata["expired"] = time.Unix(int64(td.ExpiresAt), 0).UTC().Format(time.RFC3339)
++	}
++	auth.Metadata["type"] = "kimi"
++	now := time.Now().Format(time.RFC3339)
++	auth.Metadata["last_refresh"] = now
++	return auth, nil
++}
++
++// applyKimiHeaders sets required headers for Kimi API requests.
++// Headers match kimi-cli client for compatibility.
++func applyKimiHeaders(r *http.Request, token string, stream bool) {
++	r.Header.Set("Content-Type", "application/json")
++	r.Header.Set("Authorization", "Bearer "+token)
++	// Match kimi-cli headers exactly
++	r.Header.Set("User-Agent", "KimiCLI/1.10.6")
++	r.Header.Set("X-Msh-Platform", "kimi_cli")
++	r.Header.Set("X-Msh-Version", "1.10.6")
++	r.Header.Set("X-Msh-Device-Name", getKimiHostname())
++	r.Header.Set("X-Msh-Device-Model", getKimiDeviceModel())
++	r.Header.Set("X-Msh-Device-Id", getKimiDeviceID())
++	if stream {
++		r.Header.Set("Accept", "text/event-stream")
++		return
++	}
++	r.Header.Set("Accept", "application/json")
++}
++
++// getKimiHostname returns the machine hostname.
++func getKimiHostname() string {
++	hostname, err := os.Hostname()
++	if err != nil {
++		return "unknown"
++	}
++	return hostname
++}
++
++// getKimiDeviceModel returns a device model string matching kimi-cli format.
++func getKimiDeviceModel() string {
++	return fmt.Sprintf("%s %s", runtime.GOOS, runtime.GOARCH)
++}
++
++// getKimiDeviceID returns a stable device ID, matching kimi-cli storage location.
++func getKimiDeviceID() string {
++	homeDir, err := os.UserHomeDir()
++	if err != nil {
++		return "cli-proxy-api-device"
++	}
++	// Check kimi-cli's device_id location first
++	kimiShareDir := filepath.Join(homeDir, ".local", "share", "kimi")
++	deviceIDPath := filepath.Join(kimiShareDir, "device_id")
++	if data, err := os.ReadFile(deviceIDPath); err == nil {
++		return strings.TrimSpace(string(data))
++	}
++	// Fallback to our own device ID
++	ourPath := filepath.Join(homeDir, ".cli-proxy-api", "kimi-device-id")
++	if data, err := os.ReadFile(ourPath); err == nil {
++		return strings.TrimSpace(string(data))
++	}
++	return "cli-proxy-api-device"
++}
++
++// kimiCreds extracts the access token from auth.
++func kimiCreds(a *cliproxyauth.Auth) (token string) {
++	if a == nil {
++		return ""
++	}
++	// Check metadata first (OAuth flow stores tokens here)
++	if a.Metadata != nil {
++		if v, ok := a.Metadata["access_token"].(string); ok && strings.TrimSpace(v) != "" {
++			return v
++		}
++	}
++	// Fallback to attributes (API key style)
++	if a.Attributes != nil {
++		if v := a.Attributes["access_token"]; v != "" {
++			return v
++		}
++		if v := a.Attributes["api_key"]; v != "" {
++			return v
++		}
++	}
++	return ""
++}
++
++// stripKimiPrefix removes the "kimi-" prefix from model names for the upstream API.
++func stripKimiPrefix(model string) string {
++	model = strings.TrimSpace(model)
++	if strings.HasPrefix(strings.ToLower(model), "kimi-") {
++		return model[5:]
++	}
++	return model
++}
+diff --git a/internal/runtime/executor/thinking_providers.go b/internal/runtime/executor/thinking_providers.go
+index 5a14367..b961db9 100644
+--- a/internal/runtime/executor/thinking_providers.go
++++ b/internal/runtime/executor/thinking_providers.go
+@@ -7,5 +7,6 @@ import (
+ 	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/thinking/provider/gemini"
+ 	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/thinking/provider/geminicli"
+ 	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/thinking/provider/iflow"
++	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/thinking/provider/kimi"
+ 	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/thinking/provider/openai"
+ )
+diff --git a/internal/thinking/apply.go b/internal/thinking/apply.go
+index 58c2628..ce07603 100644
+--- a/internal/thinking/apply.go
++++ b/internal/thinking/apply.go
+@@ -18,6 +18,7 @@ var providerAppliers = map[string]ProviderApplier{
+ 	"codex":       nil,
+ 	"iflow":       nil,
+ 	"antigravity": nil,
++	"kimi":        nil,
+ }
+ 
+ // GetProviderApplier returns the ProviderApplier for the given provider name.
+@@ -326,6 +327,9 @@ func extractThinkingConfig(body []byte, provider string) ThinkingConfig {
+ 			return config
+ 		}
+ 		return extractOpenAIConfig(body)
++	case "kimi":
++		// Kimi uses OpenAI-compatible reasoning_effort format
++		return extractOpenAIConfig(body)
+ 	default:
+ 		return ThinkingConfig{}
+ 	}
+diff --git a/internal/thinking/provider/kimi/apply.go b/internal/thinking/provider/kimi/apply.go
+new file mode 100644
+index 0000000..80f124c
+--- /dev/null
++++ b/internal/thinking/provider/kimi/apply.go
+@@ -0,0 +1,118 @@
++// Package kimi implements thinking configuration for Kimi (Moonshot AI) models.
++//
++// Kimi models use the OpenAI-compatible reasoning_effort format with discrete levels
++// (low/medium/high). The provider strips any existing thinking config and applies
++// the unified ThinkingConfig in OpenAI format.
++package kimi
++
++import (
++	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
++	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
++	"github.com/tidwall/gjson"
++	"github.com/tidwall/sjson"
++)
++
++// Applier implements thinking.ProviderApplier for Kimi models.
++//
++// Kimi-specific behavior:
++//   - Output format: reasoning_effort (string: low/medium/high)
++//   - Uses OpenAI-compatible format
++//   - Supports budget-to-level conversion
++type Applier struct{}
++
++var _ thinking.ProviderApplier = (*Applier)(nil)
++
++// NewApplier creates a new Kimi thinking applier.
++func NewApplier() *Applier {
++	return &Applier{}
++}
++
++func init() {
++	thinking.RegisterProvider("kimi", NewApplier())
++}
++
++// Apply applies thinking configuration to Kimi request body.
++//
++// Expected output format:
++//
++//	{
++//	  "reasoning_effort": "high"
++//	}
++func (a *Applier) Apply(body []byte, config thinking.ThinkingConfig, modelInfo *registry.ModelInfo) ([]byte, error) {
++	if thinking.IsUserDefinedModel(modelInfo) {
++		return applyCompatibleKimi(body, config)
++	}
++	if modelInfo.Thinking == nil {
++		return body, nil
++	}
++
++	if len(body) == 0 || !gjson.ValidBytes(body) {
++		body = []byte(`{}`)
++	}
++
++	var effort string
++	switch config.Mode {
++	case thinking.ModeLevel:
++		if config.Level == "" {
++			return body, nil
++		}
++		effort = string(config.Level)
++	case thinking.ModeNone:
++		// Kimi uses "none" to disable thinking
++		effort = string(thinking.LevelNone)
++	case thinking.ModeBudget:
++		// Convert budget to level using threshold mapping
++		level, ok := thinking.ConvertBudgetToLevel(config.Budget)
++		if !ok {
++			return body, nil
++		}
++		effort = level
++	case thinking.ModeAuto:
++		// Auto mode maps to "auto" effort
++		effort = string(thinking.LevelAuto)
++	default:
++		return body, nil
++	}
++
++	if effort == "" {
++		return body, nil
++	}
++
++	result, _ := sjson.SetBytes(body, "reasoning_effort", effort)
++	return result, nil
++}
++
++// applyCompatibleKimi applies thinking config for user-defined Kimi models.
++func applyCompatibleKimi(body []byte, config thinking.ThinkingConfig) ([]byte, error) {
++	if len(body) == 0 || !gjson.ValidBytes(body) {
++		body = []byte(`{}`)
++	}
++
++	var effort string
++	switch config.Mode {
++	case thinking.ModeLevel:
++		if config.Level == "" {
++			return body, nil
++		}
++		effort = string(config.Level)
++	case thinking.ModeNone:
++		effort = string(thinking.LevelNone)
++		if config.Level != "" {
++			effort = string(config.Level)
++		}
++	case thinking.ModeAuto:
++		effort = string(thinking.LevelAuto)
++	case thinking.ModeBudget:
++		// Convert budget to level
++		level, ok := thinking.ConvertBudgetToLevel(config.Budget)
++		if !ok {
++			return body, nil
++		}
++		effort = level
++	default:
++		return body, nil
++	}
++
++	result, _ := sjson.SetBytes(body, "reasoning_effort", effort)
++	return result, nil
++}
+diff --git a/sdk/auth/kimi.go b/sdk/auth/kimi.go
+new file mode 100644
+index 0000000..49e8774
+--- /dev/null
++++ b/sdk/auth/kimi.go
+@@ -0,0 +1,146 @@
++package auth
++
++import (
++	"context"
++	"fmt"
++	"time"
++
++	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/kimi"
++	"github.com/router-for-me/CLIProxyAPI/v6/internal/browser"
++	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
++	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
++	log "github.com/sirupsen/logrus"
++)
++
++// kimiRefreshLead is the duration before token expiry when refresh should occur.
++var kimiRefreshLead = 5 * time.Minute
++
++// KimiAuthenticator implements the OAuth device flow login for Kimi (Moonshot AI).
++type KimiAuthenticator struct{}
++
++// NewKimiAuthenticator constructs a new Kimi authenticator.
++func NewKimiAuthenticator() Authenticator {
++	return &KimiAuthenticator{}
++}
++
++// Provider returns the provider key for kimi.
++func (KimiAuthenticator) Provider() string {
++	return "kimi"
++}
++
++// RefreshLead returns the duration before token expiry when refresh should occur.
++// Kimi tokens expire and need to be refreshed before expiry.
++func (KimiAuthenticator) RefreshLead() *time.Duration {
++	return &kimiRefreshLead
++}
++
++// Login initiates the Kimi device flow authentication.
++func (a KimiAuthenticator) Login(ctx context.Context, cfg *config.Config, opts *LoginOptions) (*coreauth.Auth, error) {
++	if cfg == nil {
++		return nil, fmt.Errorf("cliproxy auth: configuration is required")
++	}
++	if opts == nil {
++		opts = &LoginOptions{}
++	}
++
++	authSvc := kimi.NewKimiAuth(cfg)
++
++	// Start the device flow
++	fmt.Println("Starting Kimi authentication...")
++	deviceCode, err := authSvc.StartDeviceFlow(ctx)
++	if err != nil {
++		return nil, fmt.Errorf("kimi: failed to start device flow: %w", err)
++	}
++
++	// Display the verification URL
++	verificationURL := deviceCode.VerificationURIComplete
++	if verificationURL == "" {
++		verificationURL = deviceCode.VerificationURI
++	}
++
++	fmt.Printf("\nTo authenticate, please visit:\n%s\n\n", verificationURL)
++	if deviceCode.UserCode != "" {
++		fmt.Printf("User code: %s\n\n", deviceCode.UserCode)
++	}
++
++	// Try to open the browser automatically
++	if !opts.NoBrowser {
++		if browser.IsAvailable() {
++			if errOpen := browser.OpenURL(verificationURL); errOpen != nil {
++				log.Warnf("Failed to open browser automatically: %v", errOpen)
++			} else {
++				fmt.Println("Browser opened automatically.")
++			}
++		}
++	}
++
++	fmt.Println("Waiting for authorization...")
++	if deviceCode.ExpiresIn > 0 {
++		fmt.Printf("(This will timeout in %d seconds if not authorized)\n", deviceCode.ExpiresIn)
++	}
++
++	// Wait for user authorization
++	authBundle, err := authSvc.WaitForAuthorization(ctx, deviceCode)
++	if err != nil {
++		return nil, fmt.Errorf("kimi: %w", err)
++	}
++
++	// Create the token storage
++	tokenStorage := authSvc.CreateTokenStorage(authBundle)
++
++	// Build metadata with token information
++	metadata := map[string]any{
++		"type":          "kimi",
++		"access_token":  authBundle.TokenData.AccessToken,
++		"refresh_token": authBundle.TokenData.RefreshToken,
++		"token_type":    authBundle.TokenData.TokenType,
++		"scope":         authBundle.TokenData.Scope,
++		"timestamp":     time.Now().UnixMilli(),
++	}
++
++	if authBundle.TokenData.ExpiresAt > 0 {
++		metadata["expires_at"] = authBundle.TokenData.ExpiresAt
++	}
++
++	// Generate a unique filename
++	fileName := fmt.Sprintf("kimi-%d.json", time.Now().UnixMilli())
++
++	fmt.Println("\nKimi authentication successful!")
++
++	return &coreauth.Auth{
++		ID:       fileName,
++		Provider: a.Provider(),
++		FileName: fileName,
++		Label:    "Kimi User",
++		Storage:  tokenStorage,
++		Metadata: metadata,
++	}, nil
++}
++
++// RefreshKimiToken refreshes an existing Kimi token using the refresh token.
++func RefreshKimiToken(ctx context.Context, cfg *config.Config, storage *kimi.KimiTokenStorage) (*kimi.KimiTokenStorage, error) {
++	if storage == nil || storage.RefreshToken == "" {
++		return nil, fmt.Errorf("no refresh token available")
++	}
++
++	client := kimi.NewDeviceFlowClient(cfg)
++	newTokenData, err := client.RefreshToken(ctx, storage.RefreshToken)
++	if err != nil {
++		return nil, fmt.Errorf("token refresh failed: %w", err)
++	}
++
++	expiresAt := ""
++	if newTokenData.ExpiresAt > 0 {
++		expiresAt = time.Unix(int64(newTokenData.ExpiresAt), 0).UTC().Format(time.RFC3339)
++	}
++
++	return &kimi.KimiTokenStorage{
++		AccessToken:  newTokenData.AccessToken,
++		RefreshToken: newTokenData.RefreshToken,
++		TokenType:    newTokenData.TokenType,
++		Scope:        newTokenData.Scope,
++		ExpiresAt:    expiresAt,
++		Expired:      expiresAt,
++		Type:         "kimi",
++	}, nil
++}
+diff --git a/sdk/auth/refresh_registry.go b/sdk/auth/refresh_registry.go
+index c51712a..1625e77 100644
+--- a/sdk/auth/refresh_registry.go
++++ b/sdk/auth/refresh_registry.go
+@@ -15,6 +15,7 @@ func init() {
+ 	registerRefreshLead("gemini-cli", func() Authenticator { return NewGeminiAuthenticator() })
+ 	registerRefreshLead("antigravity", func() Authenticator { return NewAntigravityAuthenticator() })
+ 	registerRefreshLead("kiro", func() Authenticator { return NewKiroAuthenticator() })
++	registerRefreshLead("kimi", func() Authenticator { return NewKimiAuthenticator() })
+ 	registerRefreshLead("github-copilot", func() Authenticator { return NewGitHubCopilotAuthenticator() })
+ }
+ 
+diff --git a/sdk/cliproxy/service.go b/sdk/cliproxy/service.go
+index 1627ecb..20f2864 100644
+--- a/sdk/cliproxy/service.go
++++ b/sdk/cliproxy/service.go
+@@ -393,6 +393,8 @@ func (s *Service) ensureExecutorsForAuth(a *coreauth.Auth) {
+ 		s.coreManager.RegisterExecutor(executor.NewIFlowExecutor(s.cfg))
+ 	case "kiro":
+ 		s.coreManager.RegisterExecutor(executor.NewKiroExecutor(s.cfg))
++	case "kimi":
++		s.coreManager.RegisterExecutor(executor.NewKimiExecutor(s.cfg))
+ 	case "github-copilot":
+ 		s.coreManager.RegisterExecutor(executor.NewGitHubCopilotExecutor(s.cfg))
+ 	default:
+@@ -792,6 +794,9 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
+ 	case "qwen":
+ 		models = registry.GetQwenModels()
+ 		models = applyExcludedModels(models, excluded)
++	case "kimi":
++		models = registry.GetKimiModels()
++		models = applyExcludedModels(models, excluded)
+ 	case "iflow":
+ 		models = registry.GetIFlowModels()
+ 		models = applyExcludedModels(models, excluded)
+diff --git a/test/thinking_conversion_test.go b/test/thinking_conversion_test.go
+index 3ad26ea..09f3220 100644
+--- a/test/thinking_conversion_test.go
++++ b/test/thinking_conversion_test.go
+@@ -14,6 +14,7 @@ import (
+ 	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/thinking/provider/gemini"
+ 	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/thinking/provider/geminicli"
+ 	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/thinking/provider/iflow"
++	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/thinking/provider/kimi"
+ 	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/thinking/provider/openai"
+ 
+ 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"

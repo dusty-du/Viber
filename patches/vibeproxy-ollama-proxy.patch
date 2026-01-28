@@ -1,0 +1,1035 @@
+--- /dev/null
++++ b/src/Sources/OllamaProxy.swift
+@@ -0,0 +1,753 @@
++import Foundation
++import Network
++
++/// Ollama-compatible proxy server on port 11434 that translates between
++/// Ollama API format and OpenAI API format, forwarding to ThinkingProxy (8317).
++class OllamaProxy {
++    private var listener: NWListener?
++    let proxyPort: UInt16 = 11434
++    private let targetPort: UInt16 = 8317
++    private let targetHost = "127.0.0.1"
++    private(set) var isRunning = false
++    private let stateQueue = DispatchQueue(label: "io.automaze.vibeproxy.ollama-proxy-state")
++
++    /// Whether we're translating a /api/chat or /api/generate request
++    private enum ResponseMode {
++        case chat
++        case generate
++    }
++
++    /// Tracks partial SSE data across receive callbacks for streaming translation
++    private final class StreamTranslationState {
++        var buffer = ""
++        var model = ""
++        var mode: ResponseMode = .chat
++    }
++
++    func start() {
++        guard !isRunning else {
++            NSLog("[OllamaProxy] Already running")
++            return
++        }
++
++        do {
++            let parameters = NWParameters.tcp
++            parameters.allowLocalEndpointReuse = true
++
++            guard let port = NWEndpoint.Port(rawValue: proxyPort) else {
++                NSLog("[OllamaProxy] Invalid port: %d", proxyPort)
++                return
++            }
++            listener = try NWListener(using: parameters, on: port)
++
++            listener?.stateUpdateHandler = { [weak self] state in
++                switch state {
++                case .ready:
++                    DispatchQueue.main.async { self?.isRunning = true }
++                    NSLog("[OllamaProxy] Listening on port %d", self?.proxyPort ?? 0)
++                case .failed(let error):
++                    NSLog("[OllamaProxy] Failed: %@", "\(error)")
++                    DispatchQueue.main.async { self?.isRunning = false }
++                case .cancelled:
++                    NSLog("[OllamaProxy] Cancelled")
++                    DispatchQueue.main.async { self?.isRunning = false }
++                default:
++                    break
++                }
++            }
++
++            listener?.newConnectionHandler = { [weak self] connection in
++                self?.handleConnection(connection)
++            }
++
++            listener?.start(queue: .global(qos: .userInitiated))
++        } catch {
++            NSLog("[OllamaProxy] Failed to start: %@", "\(error)")
++        }
++    }
++
++    func stop() {
++        stateQueue.sync {
++            guard isRunning else { return }
++            listener?.cancel()
++            listener = nil
++            DispatchQueue.main.async { [weak self] in
++                self?.isRunning = false
++            }
++            NSLog("[OllamaProxy] Stopped")
++        }
++    }
++
++    // MARK: - Connection handling
++
++    private func handleConnection(_ connection: NWConnection) {
++        connection.start(queue: .global(qos: .userInitiated))
++        receiveRequest(from: connection, accumulatedData: Data())
++    }
++
++    private func receiveRequest(from connection: NWConnection, accumulatedData: Data) {
++        connection.receive(minimumIncompleteLength: 1, maximumLength: 1048576) { [weak self] data, _, isComplete, error in
++            guard let self = self else { return }
++
++            if let error = error {
++                NSLog("[OllamaProxy] Receive error: %@", "\(error)")
++                connection.cancel()
++                return
++            }
++
++            guard let data = data, !data.isEmpty else {
++                if isComplete { connection.cancel() }
++                return
++            }
++
++            var accumulated = accumulatedData
++            accumulated.append(data)
++
++            guard let requestString = String(data: accumulated, encoding: .utf8),
++                  let headerEndRange = requestString.range(of: "\r\n\r\n") else {
++                if !isComplete {
++                    self.receiveRequest(from: connection, accumulatedData: accumulated)
++                } else {
++                    self.processRequest(data: accumulated, connection: connection)
++                }
++                return
++            }
++
++            // Check Content-Length to see if body is complete
++            let headerEndIndex = requestString.distance(from: requestString.startIndex, to: headerEndRange.upperBound)
++            let headerPart = String(requestString.prefix(headerEndIndex))
++            if let clLine = headerPart.components(separatedBy: "\r\n").first(where: { $0.lowercased().starts(with: "content-length:") }),
++               let cl = Int(clLine.components(separatedBy: ":")[1].trimmingCharacters(in: .whitespaces)) {
++                let currentBodyLength = accumulated.count - headerEndIndex
++                if currentBodyLength < cl {
++                    self.receiveRequest(from: connection, accumulatedData: accumulated)
++                    return
++                }
++            }
++
++            self.processRequest(data: accumulated, connection: connection)
++        }
++    }
++
++    // MARK: - Request processing
++
++    private func processRequest(data: Data, connection: NWConnection) {
++        guard let requestString = String(data: data, encoding: .utf8) else {
++            sendError(to: connection, statusCode: 400, message: "Invalid request")
++            return
++        }
++
++        let lines = requestString.components(separatedBy: "\r\n")
++        guard let requestLine = lines.first else {
++            sendError(to: connection, statusCode: 400, message: "Invalid request line")
++            return
++        }
++
++        let parts = requestLine.components(separatedBy: " ")
++        guard parts.count >= 2 else {
++            sendError(to: connection, statusCode: 400, message: "Invalid request format")
++            return
++        }
++
++        let method = parts[0]
++        let path = parts[1]
++        NSLog("[OllamaProxy] %@ %@", method, path)
++
++        // Extract body
++        var bodyString = ""
++        if let bodyRange = requestString.range(of: "\r\n\r\n") {
++            bodyString = String(requestString[bodyRange.upperBound...])
++        }
++
++        // Route endpoints
++        if method == "GET" && (path == "/" || path == "/api" || path == "/api/") {
++            sendPlainText(to: connection, text: "Ollama is running")
++            return
++        }
++
++        if method == "GET" && path == "/api/tags" {
++            forwardModelList(connection: connection)
++            return
++        }
++
++        if method == "POST" && path == "/api/chat" {
++            handleChatRequest(body: bodyString, connection: connection)
++            return
++        }
++
++        if method == "POST" && path == "/api/generate" {
++            handleGenerateRequest(body: bodyString, connection: connection)
++            return
++        }
++
++        sendError(to: connection, statusCode: 404, message: "Not Found")
++    }
++
++    // MARK: - /api/tags → /v1/models
++
++    private func forwardModelList(connection: NWConnection) {
++        guard let port = NWEndpoint.Port(rawValue: targetPort) else {
++            sendError(to: connection, statusCode: 500, message: "Internal error")
++            return
++        }
++
++        let endpoint = NWEndpoint.hostPort(host: NWEndpoint.Host(targetHost), port: port)
++        let targetConnection = NWConnection(to: endpoint, using: .tcp)
++
++        targetConnection.stateUpdateHandler = { [weak self] state in
++            guard let self = self else { return }
++            switch state {
++            case .ready:
++                let request = "GET /v1/models HTTP/1.1\r\nHost: \(self.targetHost):\(self.targetPort)\r\nConnection: close\r\n\r\n"
++                targetConnection.send(content: request.data(using: .utf8), completion: .contentProcessed({ error in
++                    if let error = error {
++                        NSLog("[OllamaProxy] Send models error: %@", "\(error)")
++                        targetConnection.cancel()
++                        connection.cancel()
++                    } else {
++                        self.receiveFullResponse(from: targetConnection) { responseData in
++                            self.translateModelListResponse(responseData: responseData, connection: connection)
++                        }
++                    }
++                }))
++            case .failed(let error):
++                NSLog("[OllamaProxy] Models connection failed: %@", "\(error)")
++                self.sendError(to: connection, statusCode: 502, message: "Bad Gateway")
++                targetConnection.cancel()
++            default:
++                break
++            }
++        }
++
++        targetConnection.start(queue: .global(qos: .userInitiated))
++    }
++
++    private func translateModelListResponse(responseData: Data, connection: NWConnection) {
++        guard let responseString = String(data: responseData, encoding: .utf8),
++              let bodyRange = responseString.range(of: "\r\n\r\n") else {
++            sendError(to: connection, statusCode: 502, message: "Bad upstream response")
++            return
++        }
++
++        var bodyStr = String(responseString[bodyRange.upperBound...])
++
++        // Handle chunked transfer encoding - de-chunk the body
++        let headerPart = String(responseString[..<bodyRange.lowerBound]).lowercased()
++        if headerPart.contains("transfer-encoding: chunked") {
++            bodyStr = deChunk(bodyStr)
++        }
++
++        guard let bodyData = bodyStr.data(using: .utf8),
++              let json = try? JSONSerialization.jsonObject(with: bodyData) as? [String: Any],
++              let dataArray = json["data"] as? [[String: Any]] else {
++            sendError(to: connection, statusCode: 502, message: "Invalid upstream model response")
++            return
++        }
++
++        let now = ISO8601DateFormatter().string(from: Date())
++        // Filter out Codex models — this proxy is for chat clients
++        let filtered = dataArray.filter { item in
++            let id = (item["id"] as? String ?? "").lowercased()
++            return !id.contains("codex")
++        }
++
++        let models: [[String: Any]] = filtered.map { item in
++            let id = item["id"] as? String ?? "unknown"
++            return [
++                "name": id,
++                "model": id,
++                "modified_at": now,
++                "size": 0,
++                "digest": "sha256:" + id,
++                "details": [
++                    "parent_model": "",
++                    "format": "gguf",
++                    "family": "unknown",
++                    "families": [String](),
++                    "parameter_size": "unknown",
++                    "quantization_level": "unknown"
++                ]
++            ] as [String: Any]
++        }
++
++        let ollamaResponse: [String: Any] = ["models": models]
++        guard let jsonData = try? JSONSerialization.data(withJSONObject: ollamaResponse),
++              let jsonString = String(data: jsonData, encoding: .utf8) else {
++            sendError(to: connection, statusCode: 500, message: "JSON encoding failed")
++            return
++        }
++
++        sendJSON(to: connection, json: jsonString)
++    }
++
++    // MARK: - /api/chat → /v1/chat/completions
++
++    private func handleChatRequest(body: String, connection: NWConnection) {
++        guard let bodyData = body.data(using: .utf8),
++              let json = try? JSONSerialization.jsonObject(with: bodyData) as? [String: Any] else {
++            sendError(to: connection, statusCode: 400, message: "Invalid JSON")
++            return
++        }
++
++        let translated = translateChatToOpenAI(json)
++        let streaming = translated["stream"] as? Bool ?? true
++
++        guard let translatedData = try? JSONSerialization.data(withJSONObject: translated),
++              let translatedBody = String(data: translatedData, encoding: .utf8) else {
++            sendError(to: connection, statusCode: 500, message: "Translation failed")
++            return
++        }
++
++        let model = json["model"] as? String ?? "unknown"
++        forwardToOpenAI(path: "/v1/chat/completions", body: translatedBody, model: model, mode: .chat, streaming: streaming, connection: connection)
++    }
++
++    // MARK: - /api/generate → /v1/chat/completions
++
++    private func handleGenerateRequest(body: String, connection: NWConnection) {
++        guard let bodyData = body.data(using: .utf8),
++              let json = try? JSONSerialization.jsonObject(with: bodyData) as? [String: Any] else {
++            sendError(to: connection, statusCode: 400, message: "Invalid JSON")
++            return
++        }
++
++        let translated = translateGenerateToOpenAI(json)
++        let streaming = translated["stream"] as? Bool ?? true
++
++        guard let translatedData = try? JSONSerialization.data(withJSONObject: translated),
++              let translatedBody = String(data: translatedData, encoding: .utf8) else {
++            sendError(to: connection, statusCode: 500, message: "Translation failed")
++            return
++        }
++
++        let model = json["model"] as? String ?? "unknown"
++        forwardToOpenAI(path: "/v1/chat/completions", body: translatedBody, model: model, mode: .generate, streaming: streaming, connection: connection)
++    }
++
++    // MARK: - Request translation
++
++    private func translateChatToOpenAI(_ ollama: [String: Any]) -> [String: Any] {
++        var openai: [String: Any] = [:]
++        openai["model"] = ollama["model"]
++        openai["messages"] = ollama["messages"]
++        openai["stream"] = ollama["stream"] ?? true
++
++        // Flatten options
++        if let options = ollama["options"] as? [String: Any] {
++            for (key, value) in options {
++                openai[key] = value
++            }
++        }
++
++        // Copy known top-level params
++        for key in ["temperature", "top_p", "top_k", "seed", "stop"] {
++            if let v = ollama[key] { openai[key] = v }
++        }
++
++        return openai
++    }
++
++    private func translateGenerateToOpenAI(_ ollama: [String: Any]) -> [String: Any] {
++        var openai: [String: Any] = [:]
++        openai["model"] = ollama["model"]
++        openai["stream"] = ollama["stream"] ?? true
++
++        var messages: [[String: Any]] = []
++        if let system = ollama["system"] as? String, !system.isEmpty {
++            messages.append(["role": "system", "content": system])
++        }
++        if let prompt = ollama["prompt"] as? String {
++            messages.append(["role": "user", "content": prompt])
++        }
++        openai["messages"] = messages
++
++        // Flatten options
++        if let options = ollama["options"] as? [String: Any] {
++            for (key, value) in options {
++                openai[key] = value
++            }
++        }
++
++        for key in ["temperature", "top_p", "top_k", "seed", "stop"] {
++            if let v = ollama[key] { openai[key] = v }
++        }
++
++        return openai
++    }
++
++    // MARK: - Forward to OpenAI (ThinkingProxy)
++
++    private func forwardToOpenAI(path: String, body: String, model: String, mode: ResponseMode, streaming: Bool, connection: NWConnection) {
++        guard let port = NWEndpoint.Port(rawValue: targetPort) else {
++            sendError(to: connection, statusCode: 500, message: "Internal error")
++            return
++        }
++
++        let endpoint = NWEndpoint.hostPort(host: NWEndpoint.Host(targetHost), port: port)
++        let targetConnection = NWConnection(to: endpoint, using: .tcp)
++
++        targetConnection.stateUpdateHandler = { [weak self] state in
++            guard let self = self else { return }
++            switch state {
++            case .ready:
++                let contentLength = body.utf8.count
++                let request = "POST \(path) HTTP/1.1\r\n" +
++                    "Host: \(self.targetHost):\(self.targetPort)\r\n" +
++                    "Content-Type: application/json\r\n" +
++                    "Content-Length: \(contentLength)\r\n" +
++                    "Connection: close\r\n" +
++                    "\r\n" +
++                    body
++
++                targetConnection.send(content: request.data(using: .utf8), completion: .contentProcessed({ error in
++                    if let error = error {
++                        NSLog("[OllamaProxy] Forward send error: %@", "\(error)")
++                        targetConnection.cancel()
++                        connection.cancel()
++                        return
++                    }
++
++                    if streaming {
++                        self.receiveStreamingResponse(from: targetConnection, model: model, mode: mode, connection: connection)
++                    } else {
++                        self.receiveFullResponse(from: targetConnection) { responseData in
++                            self.translateNonStreamingResponse(responseData: responseData, model: model, mode: mode, connection: connection)
++                        }
++                    }
++                }))
++
++            case .failed(let error):
++                NSLog("[OllamaProxy] Forward connection failed: %@", "\(error)")
++                self.sendError(to: connection, statusCode: 502, message: "Bad Gateway")
++                targetConnection.cancel()
++            default:
++                break
++            }
++        }
++
++        targetConnection.start(queue: .global(qos: .userInitiated))
++    }
++
++    // MARK: - Non-streaming response translation
++
++    private func translateNonStreamingResponse(responseData: Data, model: String, mode: ResponseMode, connection: NWConnection) {
++        guard let responseString = String(data: responseData, encoding: .utf8),
++              let bodyRange = responseString.range(of: "\r\n\r\n") else {
++            sendError(to: connection, statusCode: 502, message: "Bad upstream response")
++            return
++        }
++
++        var bodyStr = String(responseString[bodyRange.upperBound...])
++
++        let headerPart = String(responseString[..<bodyRange.lowerBound]).lowercased()
++        if headerPart.contains("transfer-encoding: chunked") {
++            bodyStr = deChunk(bodyStr)
++        }
++
++        guard let bodyData = bodyStr.data(using: .utf8),
++              let json = try? JSONSerialization.jsonObject(with: bodyData) as? [String: Any],
++              let choices = json["choices"] as? [[String: Any]],
++              let firstChoice = choices.first,
++              let message = firstChoice["message"] as? [String: Any] else {
++            sendError(to: connection, statusCode: 502, message: "Invalid upstream response")
++            return
++        }
++
++        let content = message["content"] as? String ?? ""
++        let role = message["role"] as? String ?? "assistant"
++        let responseModel = json["model"] as? String ?? model
++
++        var ollamaResponse: [String: Any] = [
++            "model": responseModel,
++            "done": true,
++            "done_reason": "stop",
++            "created_at": ISO8601DateFormatter().string(from: Date())
++        ]
++
++        switch mode {
++        case .chat:
++            ollamaResponse["message"] = ["role": role, "content": content]
++        case .generate:
++            ollamaResponse["response"] = content
++        }
++
++        // Add usage if available
++        if let usage = json["usage"] as? [String: Any] {
++            ollamaResponse["prompt_eval_count"] = usage["prompt_tokens"]
++            ollamaResponse["eval_count"] = usage["completion_tokens"]
++        }
++
++        guard let jsonData = try? JSONSerialization.data(withJSONObject: ollamaResponse),
++              let jsonString = String(data: jsonData, encoding: .utf8) else {
++            sendError(to: connection, statusCode: 500, message: "JSON encoding failed")
++            return
++        }
++
++        sendJSON(to: connection, json: jsonString)
++    }
++
++    // MARK: - Streaming response translation (SSE → NDJSON)
++
++    private func receiveStreamingResponse(from targetConnection: NWConnection, model: String, mode: ResponseMode, connection: NWConnection) {
++        let state = StreamTranslationState()
++        state.model = model
++        state.mode = mode
++
++        // Send initial HTTP response headers for NDJSON (no Content-Length, no chunked — just stream and close)
++        let responseHeaders = "HTTP/1.1 200 OK\r\n" +
++            "Content-Type: application/x-ndjson\r\n" +
++            "Connection: close\r\n" +
++            "\r\n"
++
++        connection.send(content: responseHeaders.data(using: .utf8), completion: .contentProcessed({ [weak self] error in
++            if let error = error {
++                NSLog("[OllamaProxy] Send streaming headers error: %@", "\(error)")
++                targetConnection.cancel()
++                connection.cancel()
++                return
++            }
++            self?.streamTranslateNextChunk(from: targetConnection, to: connection, state: state, headersParsed: false, headerBuffer: Data())
++        }))
++    }
++
++    private func streamTranslateNextChunk(from targetConnection: NWConnection, to connection: NWConnection, state: StreamTranslationState, headersParsed: Bool, headerBuffer: Data) {
++        targetConnection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] data, _, isComplete, error in
++            guard let self = self else { return }
++
++            if let error = error {
++                NSLog("[OllamaProxy] Stream receive error: %@", "\(error)")
++                targetConnection.cancel()
++                connection.cancel()
++                return
++            }
++
++            guard let data = data, !data.isEmpty else {
++                if isComplete {
++                    // Send final done line if not already sent
++                    self.sendStreamDone(to: connection, state: state)
++                    targetConnection.cancel()
++                }
++                return
++            }
++
++            if !headersParsed {
++                // Accumulate upstream HTTP headers, skip them
++                var buf = headerBuffer
++                buf.append(data)
++                if let str = String(data: buf, encoding: .utf8),
++                   let headerEnd = str.range(of: "\r\n\r\n") {
++                    // Headers parsed — feed remaining data as SSE
++                    let afterHeaders = String(str[headerEnd.upperBound...])
++                    state.buffer += afterHeaders
++                    self.processSSEBuffer(state: state, connection: connection)
++
++                    if isComplete {
++                        self.sendStreamDone(to: connection, state: state)
++                        targetConnection.cancel()
++                    } else {
++                        self.streamTranslateNextChunk(from: targetConnection, to: connection, state: state, headersParsed: true, headerBuffer: Data())
++                    }
++                } else if !isComplete {
++                    self.streamTranslateNextChunk(from: targetConnection, to: connection, state: state, headersParsed: false, headerBuffer: buf)
++                }
++                return
++            }
++
++            // Already past headers — accumulate SSE data
++            if let text = String(data: data, encoding: .utf8) {
++                state.buffer += text
++            }
++
++            self.processSSEBuffer(state: state, connection: connection)
++
++            if isComplete {
++                self.sendStreamDone(to: connection, state: state)
++                targetConnection.cancel()
++            } else {
++                self.streamTranslateNextChunk(from: targetConnection, to: connection, state: state, headersParsed: true, headerBuffer: Data())
++            }
++        }
++    }
++
++    /// Process complete SSE events from the buffer, translate each to NDJSON
++    private func processSSEBuffer(state: StreamTranslationState, connection: NWConnection) {
++        // Normalize line endings
++        state.buffer = state.buffer.replacingOccurrences(of: "\r\n", with: "\n")
++
++        // Extract complete SSE events (separated by double newline)
++        while let range = state.buffer.range(of: "\n\n") {
++            let event = String(state.buffer[..<range.lowerBound])
++            state.buffer = String(state.buffer[range.upperBound...])
++
++            // Process each line in the event
++            for line in event.components(separatedBy: "\n") {
++                let trimmed = line.trimmingCharacters(in: .whitespaces)
++                guard trimmed.hasPrefix("data:") else { continue }
++                let payload = String(trimmed.dropFirst(5)).trimmingCharacters(in: .whitespaces)
++
++                if payload == "[DONE]" {
++                    // Will be handled by sendStreamDone
++                    continue
++                }
++
++                guard let payloadData = payload.data(using: .utf8),
++                      let json = try? JSONSerialization.jsonObject(with: payloadData) as? [String: Any],
++                      let choices = json["choices"] as? [[String: Any]],
++                      let choice = choices.first,
++                      let delta = choice["delta"] as? [String: Any] else {
++                    continue
++                }
++
++                let textContent = delta["content"] as? String ?? ""
++                let reasoningContent = delta["reasoning_content"] as? String ?? ""
++
++                // Skip reasoning_content chunks — only emit actual content
++                let content: String
++                if !textContent.isEmpty {
++                    content = textContent
++                } else if !reasoningContent.isEmpty {
++                    // Drop reasoning — client doesn't support thinking display
++                    continue
++                } else {
++                    content = ""
++                }
++                let role = delta["role"] as? String ?? "assistant"
++                let responseModel = json["model"] as? String ?? state.model
++
++                var ollamaChunk: [String: Any] = [
++                    "model": responseModel,
++                    "created_at": ISO8601DateFormatter().string(from: Date()),
++                    "done": false
++                ]
++
++                switch state.mode {
++                case .chat:
++                    ollamaChunk["message"] = ["role": role, "content": content]
++                case .generate:
++                    ollamaChunk["response"] = content
++                }
++
++                if let jsonData = try? JSONSerialization.data(withJSONObject: ollamaChunk),
++                   var jsonLine = String(data: jsonData, encoding: .utf8) {
++                    jsonLine += "\n"
++                    if let lineData = jsonLine.data(using: .utf8) {
++                        connection.send(content: lineData, completion: .contentProcessed({ _ in }))
++                    }
++                }
++            }
++        }
++    }
++
++    private func sendStreamDone(to connection: NWConnection, state: StreamTranslationState) {
++        var doneChunk: [String: Any] = [
++            "model": state.model,
++            "created_at": ISO8601DateFormatter().string(from: Date()),
++            "done": true,
++            "done_reason": "stop"
++        ]
++
++        switch state.mode {
++        case .chat:
++            doneChunk["message"] = ["role": "assistant", "content": ""]
++        case .generate:
++            doneChunk["response"] = ""
++        }
++
++        if let jsonData = try? JSONSerialization.data(withJSONObject: doneChunk),
++           var jsonLine = String(data: jsonData, encoding: .utf8) {
++            jsonLine += "\n"
++            if let lineData = jsonLine.data(using: .utf8) {
++                connection.send(content: lineData, isComplete: true, completion: .contentProcessed({ _ in
++                    connection.cancel()
++                }))
++            }
++        }
++    }
++
++    // MARK: - Helpers
++
++    private func receiveFullResponse(from connection: NWConnection, accumulated: Data = Data(), completion: @escaping (Data) -> Void) {
++        connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] data, _, isComplete, error in
++            guard let self = self else { return }
++
++            var acc = accumulated
++            if let data = data { acc.append(data) }
++
++            if isComplete || error != nil {
++                connection.cancel()
++                completion(acc)
++            } else {
++                self.receiveFullResponse(from: connection, accumulated: acc, completion: completion)
++            }
++        }
++    }
++
++    private func deChunk(_ body: String) -> String {
++        var result = ""
++        var remaining = body
++
++        while !remaining.isEmpty {
++            // Find chunk size line
++            guard let lineEnd = remaining.range(of: "\r\n") ?? remaining.range(of: "\n") else { break }
++            let sizeLine = String(remaining[..<lineEnd.lowerBound]).trimmingCharacters(in: .whitespaces)
++            remaining = String(remaining[lineEnd.upperBound...])
++
++            guard let size = UInt(sizeLine, radix: 16), size > 0 else { break }
++
++            let chunkContent = String(remaining.prefix(Int(size)))
++            result += chunkContent
++            remaining = String(remaining.dropFirst(Int(size)))
++
++            // Skip trailing \r\n
++            if remaining.hasPrefix("\r\n") {
++                remaining = String(remaining.dropFirst(2))
++            } else if remaining.hasPrefix("\n") {
++                remaining = String(remaining.dropFirst(1))
++            }
++        }
++
++        return result
++    }
++
++    private func sendPlainText(to connection: NWConnection, text: String) {
++        guard let bodyData = text.data(using: .utf8) else {
++            connection.cancel()
++            return
++        }
++        let response = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: \(bodyData.count)\r\nConnection: close\r\n\r\n"
++        var responseData = Data()
++        responseData.append(response.data(using: .utf8)!)
++        responseData.append(bodyData)
++        connection.send(content: responseData, completion: .contentProcessed({ _ in
++            connection.cancel()
++        }))
++    }
++
++    private func sendJSON(to connection: NWConnection, json: String) {
++        guard let bodyData = json.data(using: .utf8) else {
++            connection.cancel()
++            return
++        }
++        let response = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: \(bodyData.count)\r\nConnection: close\r\n\r\n"
++        var responseData = Data()
++        responseData.append(response.data(using: .utf8)!)
++        responseData.append(bodyData)
++        connection.send(content: responseData, completion: .contentProcessed({ _ in
++            connection.cancel()
++        }))
++    }
++
++    private func sendError(to connection: NWConnection, statusCode: Int, message: String) {
++        guard let bodyData = message.data(using: .utf8) else {
++            connection.cancel()
++            return
++        }
++        let headers = "HTTP/1.1 \(statusCode) \(message)\r\nContent-Type: text/plain\r\nContent-Length: \(bodyData.count)\r\nConnection: close\r\n\r\n"
++        var responseData = Data()
++        responseData.append(headers.data(using: .utf8)!)
++        responseData.append(bodyData)
++        connection.send(content: responseData, completion: .contentProcessed({ _ in
++            connection.cancel()
++        }))
++    }
++}
+--- a/src/Sources/ServerManager.swift
++++ b/src/Sources/ServerManager.swift
+@@ -71,6 +71,15 @@
+     }
+     var onVercelConfigChanged: (() -> Void)?
+ 
++    /// Ollama-compatible proxy on port 11434
++    @Published var ollamaProxyEnabled: Bool = false {
++        didSet {
++            UserDefaults.standard.set(ollamaProxyEnabled, forKey: "ollamaProxyEnabled")
++            onOllamaProxyConfigChanged?()
++        }
++    }
++    var onOllamaProxyConfigChanged: (() -> Void)?
++
+     /// Helper class to capture output text across closures
+     private class OutputCapture {
+         var text = ""
+@@ -104,6 +114,7 @@
+         }
+         vercelGatewayEnabled = UserDefaults.standard.bool(forKey: "vercelGatewayEnabled")
+         vercelApiKey = UserDefaults.standard.string(forKey: "vercelApiKey") ?? ""
++        ollamaProxyEnabled = UserDefaults.standard.bool(forKey: "ollamaProxyEnabled")
+     }
+ 
+     /// Check if a provider is enabled (defaults to true if not set)
+--- a/src/Sources/AppDelegate.swift
++++ b/src/Sources/AppDelegate.swift
+@@ -10,10 +10,11 @@
+     weak var settingsWindow: NSWindow?
+     var serverManager: ServerManager!
+     var thinkingProxy: ThinkingProxy!
++    var ollamaProxy: OllamaProxy!
+     private let notificationCenter = UNUserNotificationCenter.current()
+     private var notificationPermissionGranted = false
+     private let updaterController: SPUStandardUpdaterController
+-    
++
+     override init() {
+         self.updaterController = SPUStandardUpdaterController(startingUpdater: true, updaterDelegate: nil, userDriverDelegate: nil)
+         super.init()
+@@ -22,23 +23,29 @@
+     func applicationDidFinishLaunching(_ notification: Notification) {
+         // Setup standard Edit menu for keyboard shortcuts (Cmd+C/V/X/A)
+         setupMainMenu()
+-        
++
+         // Setup menu bar
+         setupMenuBar()
+ 
+         // Initialize managers
+         serverManager = ServerManager()
+         thinkingProxy = ThinkingProxy()
++        ollamaProxy = OllamaProxy()
+ 
+         // Sync Vercel AI Gateway config from ServerManager to ThinkingProxy
+         syncVercelConfig()
+         serverManager.onVercelConfigChanged = { [weak self] in
+             self?.syncVercelConfig()
+         }
+-        
++
++        // Sync Ollama proxy enabled state
++        serverManager.onOllamaProxyConfigChanged = { [weak self] in
++            self?.syncOllamaProxy()
++        }
++
+         // Warm commonly used icons to avoid first-use disk hits
+         preloadIcons()
+-        
++
+         configureNotifications()
+ 
+         // Start server automatically
+@@ -227,6 +234,10 @@
+                         self?.updateMenuBarStatus()
+                         // User always connects to 8317 (thinking proxy)
+                         self?.showNotification(title: "Server Started", body: "VibeProxy is now running")
++                        // Start Ollama proxy if enabled
++                        if self?.serverManager.ollamaProxyEnabled == true {
++                            self?.ollamaProxy.start()
++                        }
+                     } else {
+                         // Backend failed - stop the proxy to keep state consistent
+                         self?.thinkingProxy.stop()
+@@ -255,12 +266,15 @@
+     }
+ 
+     func stopServer() {
++        // Stop the ollama proxy
++        ollamaProxy.stop()
++
+         // Stop the thinking proxy first to stop accepting new requests
+         thinkingProxy.stop()
+-        
++
+         // Then stop CLIProxyAPI backend
+         serverManager.stop()
+-        
++
+         updateMenuBarStatus()
+     }
+ 
+@@ -325,6 +339,7 @@
+     @objc func quit() {
+         // Stop server and wait for cleanup before quitting
+         if serverManager.isRunning {
++            ollamaProxy.stop()
+             thinkingProxy.stop()
+             serverManager.stop()
+         }
+@@ -338,14 +353,16 @@
+         NotificationCenter.default.removeObserver(self, name: .serverStatusChanged, object: nil)
+         // Final cleanup - stop server if still running
+         if serverManager.isRunning {
++            ollamaProxy.stop()
+             thinkingProxy.stop()
+             serverManager.stop()
+         }
+     }
+-    
++
+     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+         // If server is running, stop it first
+         if serverManager.isRunning {
++            ollamaProxy.stop()
+             thinkingProxy.stop()
+             serverManager.stop()
+             // Give server time to stop (up to 3 seconds total with the improved stop method)
+@@ -353,9 +370,19 @@
+         }
+         return .terminateNow
+     }
+-    
++
+     // MARK: - Vercel Config Sync
+ 
++    private func syncOllamaProxy() {
++        if serverManager.ollamaProxyEnabled && serverManager.isRunning {
++            if !ollamaProxy.isRunning {
++                ollamaProxy.start()
++            }
++        } else {
++            ollamaProxy.stop()
++        }
++    }
++
+     private func syncVercelConfig() {
+         thinkingProxy.vercelConfig = VercelGatewayConfig(
+             enabled: serverManager.vercelGatewayEnabled,
+--- a/src/Sources/SettingsView.swift
++++ b/src/Sources/SettingsView.swift
+@@ -287,6 +287,9 @@
+                         .onChange(of: launchAtLogin) { _, newValue in
+                             toggleLaunchAtLogin(newValue)
+                         }
++
++                    Toggle("Ollama-compatible server (port 11434)", isOn: $serverManager.ollamaProxyEnabled)
++                        .help("Expose an Ollama-compatible API on port 11434 for tools that expect Ollama")
+ 
+                     HStack {
+                         Text("Auth files")
+--- a/README.md
++++ b/README.md
+@@ -11,11 +11,14 @@
+ <a href="https://github.com/automazeio/vibeproxy"><img alt="Star this repo" src="https://img.shields.io/github/stars/automazeio/vibeproxy.svg?style=social&amp;label=Star%20this%20repo&amp;maxAge=60" style="max-width: 100%;"></a></p>
+ </p>
+ 
+-**Stop paying twice for AI.** VibeProxy is a beautiful native macOS menu bar app that lets you use your existing Claude Code, ChatGPT, **Gemini**, **Qwen**, **Antigravity**, and **Z.AI GLM** subscriptions with powerful AI coding tools like **[Factory Droids](https://app.factory.ai/r/FM8BJHFQ)** – no separate API keys required.
++**Stop paying twice for AI.** VibeProxy is a beautiful native macOS menu bar app that lets you use your existing Claude Code, ChatGPT, **Gemini**, **Qwen**, **Kimi**, **Antigravity**, and **Z.AI GLM** subscriptions with powerful AI coding tools like **[Factory Droids](https://app.factory.ai/r/FM8BJHFQ)** – no separate API keys required.
+ 
+ Built on [CLIProxyAPIPlus](https://github.com/router-for-me/CLIProxyAPIPlus), it handles OAuth authentication, token management, and API routing automatically. One click to authenticate, zero friction to code.
+ 
++> [!NOTE]
++> This is a **fork** that adds Kimi provider support, an Ollama-compatible server, and other enhancements. Builds from this fork are **ad-hoc signed** and will trigger macOS Gatekeeper. See [Installation](#installation) for how to open the app.
+ 
++
+ <p align="center">
+ <br>
+   <a href="https://www.loom.com/share/5cf54acfc55049afba725ab443dd3777"><img src="vibeproxy-factory-video.webp" width="600" height="380" alt="VibeProxy Screenshot" border="0"></a>
+@@ -36,10 +39,11 @@
+ 
+ - 🎯 **Native macOS Experience** - Clean, native SwiftUI interface that feels right at home on macOS
+ - 🚀 **One-Click Server Management** - Start/stop the proxy server from your menu bar
+-- 🔐 **Easy Authentication** - Authenticate with Codex, Claude Code, Gemini, Qwen, Antigravity (OAuth), and Z.AI GLM (API key) directly from the app
++- 🔐 **Easy Authentication** - Authenticate with Codex, Claude Code, Gemini, Qwen, Kimi, Antigravity (OAuth), and Z.AI GLM (API key) directly from the app
+ - 🛡️ **Vercel AI Gateway** - Route Claude requests through [Vercel's AI Gateway](https://vercel.com/docs/ai-gateway) for safer access to your Claude Max subscription without risking your account from direct OAuth token usage
+ - 👥 **Multi-Account Support** - Connect multiple accounts per provider with automatic round-robin distribution and failover when rate-limited
+ - 🎚️ **Provider Priority** - Enable/disable providers to control which models are available (instant hot reload)
++- 🦙 **Ollama-Compatible Server** - Built-in Ollama-compatible API on port 11434, letting you use any Ollama chat client (like [Reins](https://github.com/ibrahimcetin/reins)) with all your connected providers
+ - 📊 **Real-Time Status** - Live connection status and automatic credential detection
+ - 🔄 **Automatic App Updates** - Starting with v1.6, VibeProxy checks for updates daily and installs them seamlessly via Sparkle
+ - 🎨 **Beautiful Icons** - Custom icons with dark mode support
+@@ -48,23 +52,50 @@
+ 
+ ## Installation
+ 
+-**Requirements:** macOS 13+ (Ventura or later)
++**Requirements:** macOS 13+ (Ventura or later), Apple Silicon (M1/M2/M3/M4)
+ 
+-### Download Pre-built Release (Recommended)
++### Build from Source
+ 
+-1. Go to the [**Releases**](https://github.com/automazeio/vibeproxy/releases) page
+-2. Download the appropriate version for your Mac:
+-   - **Apple Silicon** (M1/M2/M3/M4): `VibeProxy-arm64.zip`
+-   - **Intel**: `VibeProxy-x86_64.zip` *(untested - please report issues)*
+-3. Extract and drag `VibeProxy.app` to `/Applications`
+-4. Launch VibeProxy
++1. **Clone and apply patches**
++   ```bash
++   git clone https://github.com/automazeio/vibeproxy.git
++   cd vibeproxy
+ 
+-**Code Signed & Notarized** ✅ - No Gatekeeper warnings, installs seamlessly on macOS.
++   # Apply Kimi support to CLIProxyAPIPlus backend
++   git apply patches/cliproxyapiplus-kimi-support.patch
+ 
+-### Build from Source
++   # Apply Kimi UI support to VibeProxy
++   git apply patches/vibeproxy-kimi-ui.patch
+ 
+-Want to build it yourself? See [**INSTALLATION.md**](INSTALLATION.md) for detailed build instructions.
++   # (Optional) Apply Sparkle update feed patch
++   git apply patches/vibeproxy-sparkle-feed.patch
++   ```
+ 
++2. **Build the app**
++   ```bash
++   ./create-app-bundle.sh
++   ```
++
++3. **Install**
++   ```bash
++   mv VibeProxy.app /Applications/
++   ```
++
++### Opening an Ad-Hoc Signed Build
++
++Builds from this fork are ad-hoc signed (not notarized) and will be blocked by Gatekeeper on first launch. To open the app:
++
++1. Double-click `VibeProxy.app` — macOS will show a warning that it cannot verify the developer. Click **Done**.
++2. Open **System Settings → Privacy & Security**, scroll down to the **Security** section, and click **Open Anyway** next to the VibeProxy message.
++3. Launch `VibeProxy.app` again — click **Open** when prompted, then enter your administrator password.
++
++Alternatively, remove the quarantine attribute before launching:
++```bash
++xattr -cr /Applications/VibeProxy.app
++```
++
++You only need to do this once — subsequent launches will work normally.
++
+ ## Usage
+ 
+ ### First Launch
+@@ -88,6 +119,15 @@
+ - **Menu Bar Icon**: Shows active/inactive state
+ - **Launch at Login**: Toggle to start VibeProxy automatically
+ 
++### Ollama-Compatible Server
++
++VibeProxy includes an Ollama-compatible API server on port 11434. Enable it in Settings to use any Ollama chat client with your connected providers.
++
++- **Supported endpoints**: `/api/tags`, `/api/chat`, `/api/generate`
++- **Streaming & non-streaming**: Both modes supported
++- **Kimi compatibility**: Kimi thinking/reasoning content is handled gracefully — only the final response is returned to the client
++- **Tested clients**: [Reins](https://github.com/ibrahimcetin/reins)
++
+ ## Requirements
+ 
+ - macOS 13.0 (Ventura) or later
+@@ -102,6 +142,7 @@
+ │   ├── main.swift              # App entry point
+ │   ├── AppDelegate.swift       # Menu bar & window management
+ │   ├── ServerManager.swift     # Server process control & auth
++│   ├── OllamaProxy.swift      # Ollama-compatible API server (port 11434)
+ │   ├── SettingsView.swift      # Main UI
+ │   ├── AuthStatus.swift        # Auth file monitoring
+ │   └── Resources/

@@ -1,0 +1,152 @@
+<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>VibeProxy Updates (Patched Fork)</title>
+    <link>https://github.com/dusty-du/vibeproxy</link>
+    <description>Patched VibeProxy with Kimi support - updates from dusty-du fork</description>
+    <language>en</language>
+    <item>
+      <title>Version 1.8.70.07</title>
+      <sparkle:version>466</sparkle:version>
+      <sparkle:shortVersionString>1.8.70.07</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+      <pubDate>Wed, 28 Jan 2026 18:06:13 +0000</pubDate>
+      <enclosure url="https://github.com/dusty-du/vibeproxy/releases/download/v1.8.70.07/VibeProxy-arm64.zip"
+                 type="application/octet-stream"
+                 sparkle:edSignature="6ICZFiEhdp56L/VS6tIPMkh6nSimNdBVZUR2fnMHVHC6lIqi0qzzp34gq/FfUXWUnEZ6q6IFzrc/AlTk+lyRCw=="
+                 length="17960180"/>
+    </item>
+    <item>
+      <title>Version 1.8.70.06</title>
+      <sparkle:version>464</sparkle:version>
+      <sparkle:shortVersionString>1.8.70.06</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+      <pubDate>Wed, 28 Jan 2026 14:36:08 +0000</pubDate>
+      <enclosure url="https://github.com/dusty-du/vibeproxy/releases/download/v1.8.70.06/VibeProxy-arm64.zip"
+                 type="application/octet-stream"
+                 sparkle:edSignature="OAj/AXTQZfhUIh76BKuLuKtN9eU2Y6SnyXzghg1c90+i4O2MkAxp+9wC0gvS+qSfjmkzrVd9Oa+a6Kk4VKgIDw=="
+                 length="17952616"/>
+    </item>
+    <item>
+      <title>Version 1.8.70.05</title>
+      <sparkle:version>462</sparkle:version>
+      <sparkle:shortVersionString>1.8.70.05</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+      <pubDate>Wed, 28 Jan 2026 14:23:26 +0000</pubDate>
+      <enclosure url="https://github.com/dusty-du/vibeproxy/releases/download/v1.8.70.05/VibeProxy-arm64.zip"
+                 type="application/octet-stream"
+                 sparkle:edSignature="h+gAUsAsVIlsPO1DCsxLt3kheWA1S24AIOXvFDis8yuIELn6w3m+xAq2KnwhXnelCFCkKyCHPc4riVFw7lFTCA=="
+                 length="17951860"/>
+    </item>
+    <item>
+      <title>Version 1.8.70.04</title>
+      <sparkle:version>460</sparkle:version>
+      <sparkle:shortVersionString>1.8.70.04</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+      <pubDate>Wed, 28 Jan 2026 14:12:35 +0000</pubDate>
+      <enclosure url="https://github.com/dusty-du/vibeproxy/releases/download/v1.8.70.04/VibeProxy-arm64.zip"
+                 type="application/octet-stream"
+                 sparkle:edSignature="himIPy3M6vd2UkHlhmcPWCFnTv5sC3Xt2s6xt2d2rhjIxy7VUPb0fSM/jc2iTWc9AhtGWHOW8+Xj/mZHG0kODQ=="
+                 length="17952497"/>
+    </item>
+    <item>
+      <title>Version 1.8.70.03</title>
+      <sparkle:version>458</sparkle:version>
+      <sparkle:shortVersionString>1.8.70.03</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+      <pubDate>Wed, 28 Jan 2026 13:57:12 +0000</pubDate>
+      <enclosure url="https://github.com/dusty-du/vibeproxy/releases/download/v1.8.70.03/VibeProxy-arm64.zip"
+                 type="application/octet-stream"
+                 sparkle:edSignature="dzhSSIl836iLKZv1CAoP42+FpROujSLM42y5OmQ9/AG38k9nK99Ovprj3gzED6WEmGt4m1EXi3f+PDs+tlCwCg=="
+                 length="17952210"/>
+    </item>
+    <item>
+      <title>Version 1.8.70.02</title>
+      <sparkle:version>456</sparkle:version>
+      <sparkle:shortVersionString>1.8.70.02</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+      <pubDate>Wed, 28 Jan 2026 13:49:39 +0000</pubDate>
+      <enclosure url="https://github.com/dusty-du/vibeproxy/releases/download/v1.8.70.02/VibeProxy-arm64.zip"
+                 type="application/octet-stream"
+                 sparkle:edSignature="vWbWlPRpm+IvY+wDuFR5V0/2yJIPvDEo7E4+J5S/Jzg4PWY9Z/xLZu2WXLaSA0m7mBJywqvw3f/FmLjLSr20DA=="
+                 length="17953266"/>
+    </item>
+    <item>
+      <title>Version 1.8.70.01</title>
+      <sparkle:version>454</sparkle:version>
+      <sparkle:shortVersionString>1.8.70.01</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+      <pubDate>Wed, 28 Jan 2026 13:40:25 +0000</pubDate>
+      <enclosure url="https://github.com/dusty-du/vibeproxy/releases/download/v1.8.70.01/VibeProxy-arm64.zip"
+                 type="application/octet-stream"
+                 sparkle:edSignature="P0iaHXxCW3gG8sA3f27W9JESIefm3ujD7MuJrJ6ToQc+dvPsbLOBkRgJuwzVC6mmLbsae4vTRVs6uUkAtJQDCQ=="
+                 length="17949188"/>
+    </item>
+    <item>
+      <title>Version 1.8.70</title>
+      <sparkle:version>452</sparkle:version>
+      <sparkle:shortVersionString>1.8.70</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+      <pubDate>Wed, 28 Jan 2026 13:21:33 +0000</pubDate>
+      <enclosure url="https://github.com/dusty-du/vibeproxy/releases/download/v1.8.70/VibeProxy-arm64.zip"
+                 type="application/octet-stream"
+                 sparkle:edSignature="hFXEwD4SBX7KLSIr8kBYYKaLcl3Z2VuMngsMWDjgUmw0ki4or0sbYVD5QN0+kdWHoL5vwMAwq983NeQjM7bBDg=="
+                 length="17949193"/>
+    </item>
+    <item>
+      <title>Version 1.8.70</title>
+      <sparkle:version>448</sparkle:version>
+      <sparkle:shortVersionString>1.8.70</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+      <pubDate>Wed, 28 Jan 2026 12:53:39 +0000</pubDate>
+      <enclosure url="https://github.com/dusty-du/vibeproxy/releases/download/v1.8.70/VibeProxy-arm64.zip"
+                 type="application/octet-stream"
+                 sparkle:edSignature="6e5qGuiPhDlp9I4A9zSte2xJnNpVg5uHSkAq49pPhvzhHL52KmHJYThojayPuNSOSZGDHdP9HoZhQC95SEswDQ=="
+                 length="17947257"/>
+    </item>
+    <item>
+      <title>Version 1.8.70</title>
+      <sparkle:version>447</sparkle:version>
+      <sparkle:shortVersionString>1.8.70</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+      <pubDate>Wed, 28 Jan 2026 12:47:04 +0000</pubDate>
+      <enclosure url="https://github.com/dusty-du/vibeproxy/releases/download/v1.8.70/VibeProxy-arm64.zip"
+                 type="application/octet-stream"
+                 sparkle:edSignature="/+X5qSjBm6rqRJDfR5v7GriyMjFRKezFn57a2bcjFOuJhHYcv3NqrRn0so71oYm2s1RA4x931Ep+wInHDJ9fDQ=="
+                 length="17947256"/>
+    </item>
+    <item>
+      <title>Version 1.8.70</title>
+      <sparkle:version>443</sparkle:version>
+      <sparkle:shortVersionString>1.8.70</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+      <pubDate>Wed, 28 Jan 2026 01:29:58 +0000</pubDate>
+      <enclosure url="https://github.com/dusty-du/vibeproxy/releases/download/v1.8.70/VibeProxy-arm64.zip"
+                 type="application/octet-stream"
+                 sparkle:edSignature="0/EsPHhRTuUhRtFsUxfPV8zGURLY1NhF3TYkadnczk5yX9j6TyyR3Gbrat4BJ3vJ/vHvQCZ9UxY9AFuy755nBA=="
+                 length="17944865"/>
+    </item>
+    <item>
+      <title>Version 1.8.69</title>
+      <sparkle:version>434</sparkle:version>
+      <sparkle:shortVersionString>1.8.69</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+      <pubDate>Tue, 27 Jan 2026 22:36:03 +0000</pubDate>
+      <enclosure url="https://github.com/dusty-du/vibeproxy/releases/download/v1.8.69/VibeProxy-arm64.zip"
+                 type="application/octet-stream"
+                 sparkle:edSignature="ASwWa9GnQ3rjmPIrq6ToercVluCiYX2olT8885YlTsf0wVTCVW+3pIpxArEUxroKOpmmzW7qJ24Es8WmhMwqDw=="
+                 length="18155123"/>
+    </item>
+    <item>
+      <title>Version 1.8.69</title>
+      <sparkle:version>431</sparkle:version>
+      <sparkle:shortVersionString>1.8.69</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+      <pubDate>Tue, 27 Jan 2026 21:49:26 +0000</pubDate>
+      <enclosure url="https://github.com/dusty-du/vibeproxy/releases/download/v1.8.69/VibeProxy-arm64.zip"
+                 type="application/octet-stream"
+                 sparkle:edSignature="GZWb21V1HI1npxsvyAPtPnqP5u6+1GudyBHOUDR8YA9b7ixNx+qGyUMs7SUCECA/eG4Jqe7RRX2GI5aZy02kDg=="
+                 length="17925126"/>
+    </item>
+  </channel>
+</rss>
