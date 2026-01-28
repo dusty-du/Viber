@@ -37,6 +37,7 @@ Built on [CLIProxyAPIPlus](https://github.com/router-for-me/CLIProxyAPIPlus), it
 ## Features
 
 - 🎯 **Native macOS Experience** - Clean, native SwiftUI interface that feels right at home on macOS
+- 💎 **Liquid Glass UI** - Modern Liquid Glass design with smooth, responsive animations
 - 🚀 **One-Click Server Management** - Start/stop the proxy server from your menu bar
 - 🔐 **Easy Authentication** - Authenticate with Codex, Claude Code, Gemini, Qwen, Kimi, Antigravity (OAuth), and Z.AI GLM (API key) directly from the app
 - 🛡️ **Vercel AI Gateway** - Route Claude requests through [Vercel's AI Gateway](https://vercel.com/docs/ai-gateway) for safer access to your Claude Max subscription without risking your account from direct OAuth token usage
