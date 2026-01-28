@@ -52,7 +52,7 @@ Built on [CLIProxyAPIPlus](https://github.com/router-for-me/CLIProxyAPIPlus), it
 
 ## Installation
 
-**Requirements:** macOS 26.1 or later, Apple Silicon (M1/M2/M3/M4). Intel x86-64 can be built from source but is not actively maintained.
+**Requirements:** macOS 26.1 or later. Precompiled releases only support Apple Silicon.
 
 ### Build from Source
 
@@ -130,9 +130,7 @@ VibeProxy includes an Ollama-compatible API server on port 11434. Enable it in S
 
 ## Requirements
 
-- macOS 26.1 or later
-- Apple Silicon (M1/M2/M3/M4)
-- Intel x86-64 (build from source; not actively maintained)
+Precompiled releases only support Apple Silicon.
 
 ## Development
 
