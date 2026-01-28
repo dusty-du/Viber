@@ -24,7 +24,7 @@ Built on [CLIProxyAPIPlus](https://github.com/router-for-me/CLIProxyAPIPlus), it
 </p>
 
 > [!TIP]
-> 📣 **NEW: Vercel AI Gateway Integration!**<br>Route your Claude requests through [Vercel's officially sanctioned AI Gateway](https://vercel.com/docs/ai-gateway) for safer access to your Claude Max subscription. No more worrying about account risks from using OAuth tokens directly!
+> 📣 **NEW: Kimi support + Ollama-compatible server!**<br>Connect Kimi (Moonshot AI) via OAuth device flow and optionally enable an Ollama-compatible server on port 11434 for tools that expect Ollama.
 >
 > **Latest models supported:** Gemini 3 Pro (via Antigravity), GPT-5.1 / GPT-5.1 Codex, Claude Sonnet 4.5 / Opus 4.5 with extended thinking, GitHub Copilot, and Z.AI GLM-4.7! 🚀 
 > 
