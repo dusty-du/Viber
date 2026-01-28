@@ -21,7 +21,6 @@ Built on [CLIProxyAPIPlus](https://github.com/router-for-me/CLIProxyAPIPlus), it
 
 <p align="center">
 <br>
-  <a href="https://www.loom.com/share/5cf54acfc55049afba725ab443dd3777"><img src="vibeproxy-factory-video.webp" width="600" height="380" alt="VibeProxy Screenshot" border="0"></a>
 </p>
 
 > [!TIP]
@@ -52,7 +51,7 @@ Built on [CLIProxyAPIPlus](https://github.com/router-for-me/CLIProxyAPIPlus), it
 
 ## Installation
 
-**Requirements:** macOS 13+ (Ventura or later), Apple Silicon (M1/M2/M3/M4)
+**Requirements:** macOS 26.1 or later, Apple Silicon (M1/M2/M3/M4)
 
 ### Build from Source
 
@@ -130,7 +129,8 @@ VibeProxy includes an Ollama-compatible API server on port 11434. Enable it in S
 
 ## Requirements
 
-- macOS 13.0 (Ventura) or later
+- macOS 26.1 or later
+- Apple Silicon (M1/M2/M3/M4)
 
 ## Development
 
