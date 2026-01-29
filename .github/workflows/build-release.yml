@@ -32,12 +32,108 @@ jobs:
         run: |
           ditto -c -k --sequesterRsrc --keepParent VibeProxy.app VibeProxy.app.zip
 
+      - name: Checkout main for appcast update
+        run: |
+          git fetch origin main
+          git checkout main
+
+      - name: Generate signed appcast entry
+        env:
+          SPARKLE_ED25519_PRIVATE_KEY: ${{ secrets.SPARKLE_ED25519_PRIVATE_KEY }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          GITHUB_RUN_NUMBER: ${{ github.run_number }}
+        run: |
+          set -euo pipefail
+          if [ -z "${SPARKLE_ED25519_PRIVATE_KEY:-}" ]; then
+            echo "Missing SPARKLE_ED25519_PRIVATE_KEY secret"
+            exit 1
+          fi
+
+          KEY_FILE="$(mktemp)"
+          printf "%s" "$SPARKLE_ED25519_PRIVATE_KEY" > "$KEY_FILE"
+
+          curl -L -o sparkle.tar.xz https://github.com/sparkle-project/Sparkle/releases/download/2.5.0/Sparkle-2.5.0.tar.xz
+          tar -xf sparkle.tar.xz
+
+          SIGN_OUTPUT="$(./Sparkle-2.5.0/bin/sign_update -s "$KEY_FILE" VibeProxy.app.zip)"
+          export ED_SIGNATURE="$(echo "$SIGN_OUTPUT" | sed -n 's/.*sparkle:edSignature="\\([^"]*\\)".*/\\1/p')"
+          export FILE_LENGTH="$(echo "$SIGN_OUTPUT" | sed -n 's/.*length="\\([0-9]*\\)".*/\\1/p')"
+
+          if [ -z "$ED_SIGNATURE" ] || [ -z "$FILE_LENGTH" ]; then
+            echo "Failed to parse sign_update output"
+            echo "$SIGN_OUTPUT"
+            exit 1
+          fi
+
+          python3 - <<'PY'
+          import datetime
+          import os
+          import re
+
+          tag = os.environ["RELEASE_TAG"]
+          version = tag.lstrip("v")
+          build = os.environ.get("GITHUB_RUN_NUMBER", "1")
+          url = f"https://github.com/dusty-du/Viber/releases/download/{tag}/VibeProxy.app.zip"
+          ed_sig = os.environ["ED_SIGNATURE"]
+          length = os.environ["FILE_LENGTH"]
+
+          pub_date = datetime.datetime.utcnow().strftime("%a, %d %b %Y %H:%M:%S +0000")
+          min_system = "26.1"
+
+          item = f"""    <item>
+      <title>Version {version}</title>
+      <sparkle:version>{build}</sparkle:version>
+      <sparkle:shortVersionString>{version}</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>{min_system}</sparkle:minimumSystemVersion>
+      <pubDate>{pub_date}</pubDate>
+      <enclosure url="{url}"
+                 type="application/octet-stream"
+                 sparkle:edSignature="{ed_sig}"
+                 length="{length}"/>
+    </item>
+"""
+
+          with open("appcast.xml", "r", encoding="utf-8") as f:
+            content = f.read()
+
+          if f"<sparkle:shortVersionString>{version}</sparkle:shortVersionString>" in content:
+            print("Appcast already contains this version; skipping update.")
+            raise SystemExit(0)
+
+          # Insert after the <language> element
+          pattern = r"(\\s*<language>.*?</language>\\s*)"
+          match = re.search(pattern, content, flags=re.DOTALL)
+          if not match:
+            raise SystemExit("Could not find <language> tag to insert after.")
+
+          insert_at = match.end(1)
+          new_content = content[:insert_at] + "\n" + item + content[insert_at:]
+
+          with open("appcast.xml", "w", encoding="utf-8") as f:
+            f.write(new_content)
+          PY
+
+      - name: Commit appcast update
+        run: |
+          set -euo pipefail
+          if git diff --quiet appcast.xml; then
+            echo "No appcast changes to commit."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add appcast.xml
+          git commit -m "Update appcast for ${{ github.ref_name }}"
+          git push origin main
+
       - name: Upload to release (tag push)
         if: github.event_name == 'push'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
-          files: VibeProxy.app.zip
+          files: |
+            VibeProxy.app.zip
+            appcast.xml
           generate_release_notes: true
 
       - name: Upload to release (published release)
