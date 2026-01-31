@@ -29,7 +29,7 @@
     <key>NSHumanReadableCopyright</key>
     <string>Copyright © 2025 Automaze, Ltd. All rights reserved.</string>
     <key>SUFeedURL</key>
-    <string>https://raw.githubusercontent.com/dusty-du/vibeproxy/main/appcast.xml</string>
+    <string>https://raw.githubusercontent.com/dusty-du/Viber/main/appcast.xml</string>
     <key>SUScheduledCheckInterval</key>
     <integer>86400</integer>
     <key>SUAutomaticallyUpdate</key>
@@ -37,6 +37,6 @@
     <key>SUEnableAutomaticChecks</key>
     <true/>
     <key>SUPublicEDKey</key>
-    <string>oorPadsiWOCUWdIl6iWCtuZ36frZW8mMzjhDgzodgqc=</string>
+    <string>yw/yizu0x6kZnW8/cjxs9Ghq35L1q5bNXAQkPECE99E=</string>
 </dict>
 </plist>

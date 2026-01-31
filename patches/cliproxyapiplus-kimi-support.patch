@@ -547,21 +547,34 @@ index 0000000..fc8558e
 +
 +// IsExpired checks if the token has expired.
 +func (ts *KimiTokenStorage) IsExpired() bool {
-+	expiresAtStr := ts.ExpiresAt
-+	if expiresAtStr == "" {
-+		expiresAtStr = ts.Expired
++	var candidates []time.Time
++	if ts.ExpiresAt != "" {
++		if t, err := time.Parse(time.RFC3339, ts.ExpiresAt); err == nil {
++			candidates = append(candidates, t)
++		}
 +	}
-+	if expiresAtStr == "" {
++	if ts.Expired != "" {
++		if t, err := time.Parse(time.RFC3339, ts.Expired); err == nil {
++			candidates = append(candidates, t)
++		}
++	}
++	if len(candidates) == 0 {
++		if ts.ExpiresAt != "" || ts.Expired != "" {
++			return true // Has expiry strings but can't parse
++		}
 +		return false // No expiry set, assume valid
 +	}
 +
-+	expiresAt, err := time.Parse(time.RFC3339, expiresAtStr)
-+	if err != nil {
-+		return true // Can't parse, assume expired
++	// Choose the latest expiry to avoid premature expiry when fields disagree.
++	latest := candidates[0]
++	for i := 1; i < len(candidates); i++ {
++		if candidates[i].After(latest) {
++			latest = candidates[i]
++		}
 +	}
 +
 +	// Consider expired if within refresh threshold
-+	return time.Now().Add(time.Duration(refreshThresholdSeconds) * time.Second).After(expiresAt)
++	return time.Now().Add(time.Duration(refreshThresholdSeconds) * time.Second).After(latest)
 +}
 +
 +// NeedsRefresh checks if the token should be refreshed.
