@@ -67,13 +67,11 @@ jobs:
             exit 1
           fi
 
-          SIGN_OUTPUT="$("$SIGN_TOOL" --ed-key-file "$KEY_FILE" VibeProxy.app.zip)"
-          export ED_SIGNATURE="$(echo "$SIGN_OUTPUT" | sed -n 's/.*sparkle:edSignature="\\([^"]*\\)".*/\\1/p')"
-          export FILE_LENGTH="$(echo "$SIGN_OUTPUT" | sed -n 's/.*length="\\([0-9]*\\)".*/\\1/p')"
+          export ED_SIGNATURE="$("$SIGN_TOOL" --ed-key-file "$KEY_FILE" -p VibeProxy.app.zip)"
+          export FILE_LENGTH="$(stat -f%z VibeProxy.app.zip)"
 
           if [ -z "$ED_SIGNATURE" ] || [ -z "$FILE_LENGTH" ]; then
-            echo "Failed to parse sign_update output"
-            echo "$SIGN_OUTPUT"
+            echo "Failed to get signature or file length"
             exit 1
           fi
 
