@@ -55,7 +55,14 @@ jobs:
           curl -L -o sparkle.tar.xz https://github.com/sparkle-project/Sparkle/releases/download/2.5.0/Sparkle-2.5.0.tar.xz
           tar -xf sparkle.tar.xz
 
-          SIGN_OUTPUT="$(./Sparkle-2.5.0/bin/sign_update --ed-key-file "$KEY_FILE" VibeProxy.app.zip)"
+          SIGN_TOOL="$(find . -maxdepth 4 -type f -path "./Sparkle*/bin/sign_update" | head -1)"
+          if [ -z "$SIGN_TOOL" ]; then
+            echo "sign_update not found after extracting Sparkle"
+            find . -maxdepth 4 -type f -name sign_update
+            exit 1
+          fi
+
+          SIGN_OUTPUT="$("$SIGN_TOOL" --ed-key-file "$KEY_FILE" VibeProxy.app.zip)"
           export ED_SIGNATURE="$(echo "$SIGN_OUTPUT" | sed -n 's/.*sparkle:edSignature="\\([^"]*\\)".*/\\1/p')"
           export FILE_LENGTH="$(echo "$SIGN_OUTPUT" | sed -n 's/.*length="\\([0-9]*\\)".*/\\1/p')"
 
