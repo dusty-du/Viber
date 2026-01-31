@@ -97,7 +97,6 @@ jobs:
           tag_name: ${{ github.ref_name }}
           files: |
             VibeProxy.app.zip
-            appcast.xml
           generate_release_notes: true
 
       - name: Upload to release (published release)
