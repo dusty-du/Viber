@@ -55,82 +55,27 @@ jobs:
           curl -L -o sparkle.tar.xz https://github.com/sparkle-project/Sparkle/releases/download/2.5.0/Sparkle-2.5.0.tar.xz
           tar -xf sparkle.tar.xz
 
-          SIGN_TOOL=""
-          if [ -x "./bin/sign_update" ]; then
-            SIGN_TOOL="./bin/sign_update"
+          GEN_TOOL=""
+          if [ -x "./bin/generate_appcast" ]; then
+            GEN_TOOL="./bin/generate_appcast"
           else
-            SIGN_TOOL="$(find . -maxdepth 4 -type f -path "*/bin/sign_update" | head -1)"
+            GEN_TOOL="$(find . -maxdepth 4 -type f -path "*/bin/generate_appcast" | head -1)"
           fi
-          if [ -z "$SIGN_TOOL" ]; then
-            echo "sign_update not found after extracting Sparkle"
-            find . -maxdepth 4 -type f -name sign_update
+          if [ -z "$GEN_TOOL" ]; then
+            echo "generate_appcast not found after extracting Sparkle"
+            find . -maxdepth 4 -type f -name generate_appcast
             exit 1
           fi
 
-          export ED_SIGNATURE="$("$SIGN_TOOL" --ed-key-file "$KEY_FILE" -p VibeProxy.app.zip)"
-          export FILE_LENGTH="$(stat -f%z VibeProxy.app.zip)"
+          mkdir -p sparkle_updates
+          cp VibeProxy.app.zip sparkle_updates/
 
-          if [ -z "$ED_SIGNATURE" ] || [ -z "$FILE_LENGTH" ]; then
-            echo "Failed to get signature or file length"
-            exit 1
-          fi
-
-          python3 - <<'PY'
-          import datetime
-          import os
-          import re
-
-          tag = os.environ["RELEASE_TAG"]
-          version = tag.lstrip("v")
-          build = os.environ.get("GITHUB_RUN_NUMBER", "1")
-          url = f"https://github.com/dusty-du/Viber/releases/download/{tag}/VibeProxy.app.zip"
-          ed_sig = os.environ["ED_SIGNATURE"]
-          length = os.environ["FILE_LENGTH"]
-
-          pub_date = datetime.datetime.utcnow().strftime("%a, %d %b %Y %H:%M:%S +0000")
-          min_system = "26.1"
-
-          item = (
-            "    <item>\n"
-            f"      <title>Version {version}</title>\n"
-            f"      <sparkle:version>{build}</sparkle:version>\n"
-            f"      <sparkle:shortVersionString>{version}</sparkle:shortVersionString>\n"
-            f"      <sparkle:minimumSystemVersion>{min_system}</sparkle:minimumSystemVersion>\n"
-            f"      <pubDate>{pub_date}</pubDate>\n"
-            f"      <enclosure url=\"{url}\"\n"
-            "                 type=\"application/octet-stream\"\n"
-            f"                 sparkle:edSignature=\"{ed_sig}\"\n"
-            f"                 length=\"{length}\"/>\n"
-            "    </item>\n"
-          )
-
-          with open("appcast.xml", "r", encoding="utf-8") as f:
-            content = f.read()
-
-          if f"<sparkle:shortVersionString>{version}</sparkle:shortVersionString>" in content:
-            print("Appcast already contains this version; skipping update.")
-            raise SystemExit(0)
-
-          language_match = re.search(r"(\\s*<language>.*?</language>\\s*)", content, flags=re.DOTALL)
-          if language_match:
-            insert_at = language_match.end(1)
-            new_content = content[:insert_at] + "\n" + item + content[insert_at:]
-          else:
-            # If no <language> exists, insert before the first <item> if present, otherwise after <channel>.
-            item_match = re.search(r"(\\s*<item>\\s*)", content)
-            if item_match:
-              insert_at = item_match.start(1)
-              new_content = content[:insert_at] + item + content[insert_at:]
-            else:
-              channel_match = re.search(r"(\\s*<channel>\\s*)", content)
-              if not channel_match:
-                raise SystemExit("Could not find <channel> tag to insert after.")
-              insert_at = channel_match.end(1)
-              new_content = content[:insert_at] + "\n" + item + content[insert_at:]
-
-          with open("appcast.xml", "w", encoding="utf-8") as f:
-            f.write(new_content)
-          PY
+          "$GEN_TOOL" \
+            --ed-key-file "$KEY_FILE" \
+            --download-url-prefix "https://github.com/dusty-du/Viber/releases/download/${RELEASE_TAG}/" \
+            --link "https://github.com/dusty-du/Viber" \
+            -o appcast.xml \
+            sparkle_updates
 
       - name: Commit appcast update
         run: |
