@@ -28,9 +28,16 @@ jobs:
       - name: Build app bundle
         run: ./create-app-bundle.sh
 
+      - name: Set release variables
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          VERSION="${VERSION#.}"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "ZIP_NAME=VibeProxy-${VERSION}.zip" >> "$GITHUB_ENV"
+
       - name: Zip app bundle
         run: |
-          ditto -c -k --sequesterRsrc --keepParent VibeProxy.app VibeProxy.app.zip
+          ditto -c -k --sequesterRsrc --keepParent VibeProxy.app "$ZIP_NAME"
 
       - name: Checkout main for appcast update
         run: |
@@ -68,7 +75,8 @@ jobs:
           fi
 
           mkdir -p sparkle_updates
-          cp VibeProxy.app.zip sparkle_updates/
+          rm -f appcast.xml
+          cp "$ZIP_NAME" sparkle_updates/
 
           "$GEN_TOOL" \
             --ed-key-file "$KEY_FILE" \
@@ -96,7 +104,7 @@ jobs:
         with:
           tag_name: ${{ github.ref_name }}
           files: |
-            VibeProxy.app.zip
+            ${{ env.ZIP_NAME }}
           generate_release_notes: true
 
       - name: Upload to release (published release)
@@ -104,4 +112,4 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event.release.tag_name }}
-          files: VibeProxy.app.zip
+          files: ${{ env.ZIP_NAME }}

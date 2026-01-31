@@ -102,6 +102,8 @@ if [ -z "$VERSION" ]; then
     VERSION=$(git describe --tags --abbrev=0 2>/dev/null || echo "1.0.0")
     # Remove 'v' prefix if present
     VERSION="${VERSION#v}"
+    # Remove leading dot if tag is like "v.1.2.3"
+    VERSION="${VERSION#.}"
 fi
 
 # Extract build number from full git describe (e.g., v1.0.0-5-g1234567 -> 5, or just use commit count)
