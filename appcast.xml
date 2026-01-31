@@ -11,5 +11,14 @@
             <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
             <enclosure url="https://github.com/dusty-du/Viber/releases/download/v1.0.2/VibeProxy-1.0.2.zip" length="18014027" type="application/octet-stream" sparkle:edSignature="q7kjx/iMpPFiKhCGxr5piD3+Fi5WsDEA+ZB6fq8vnr7VjFGj5ShRVJdwdVr1rpofN+Vw1JseCNVYl5AJOBcFDQ=="/>
         </item>
+        <item>
+            <title>1.0.10</title>
+            <pubDate>Sat, 31 Jan 2026 21:24:02 +0000</pubDate>
+            <link>https://github.com/dusty-du/Viber</link>
+            <sparkle:version>1</sparkle:version>
+            <sparkle:shortVersionString>1.0.10</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <enclosure url="https://github.com/dusty-du/Viber/releases/download/v1.0.10/VibeProxy.app.zip" length="17926131" type="application/octet-stream" sparkle:edSignature="Pq9rc7FCsC/vOiSU8hO+4X5jpsP/IEyZg6WCZgFNBpKg4rg2d/h75UEbwF4/Kd+RDLftWVaqBFXBK42AvmK6DQ=="/>
+        </item>
     </channel>
 </rss>
