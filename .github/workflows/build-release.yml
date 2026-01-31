@@ -55,7 +55,12 @@ jobs:
           curl -L -o sparkle.tar.xz https://github.com/sparkle-project/Sparkle/releases/download/2.5.0/Sparkle-2.5.0.tar.xz
           tar -xf sparkle.tar.xz
 
-          SIGN_TOOL="$(find . -maxdepth 4 -type f -path "./Sparkle*/bin/sign_update" | head -1)"
+          SIGN_TOOL=""
+          if [ -x "./bin/sign_update" ]; then
+            SIGN_TOOL="./bin/sign_update"
+          else
+            SIGN_TOOL="$(find . -maxdepth 4 -type f -path "*/bin/sign_update" | head -1)"
+          fi
           if [ -z "$SIGN_TOOL" ]; then
             echo "sign_update not found after extracting Sparkle"
             find . -maxdepth 4 -type f -name sign_update
