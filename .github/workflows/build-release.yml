@@ -12,7 +12,7 @@ permissions:
 
 jobs:
   build-and-release:
-    runs-on: macos-26
+    runs-on: macos-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
