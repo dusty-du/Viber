@@ -80,18 +80,19 @@ jobs:
           pub_date = datetime.datetime.utcnow().strftime("%a, %d %b %Y %H:%M:%S +0000")
           min_system = "26.1"
 
-          item = f"""    <item>
-      <title>Version {version}</title>
-      <sparkle:version>{build}</sparkle:version>
-      <sparkle:shortVersionString>{version}</sparkle:shortVersionString>
-      <sparkle:minimumSystemVersion>{min_system}</sparkle:minimumSystemVersion>
-      <pubDate>{pub_date}</pubDate>
-      <enclosure url="{url}"
-                 type="application/octet-stream"
-                 sparkle:edSignature="{ed_sig}"
-                 length="{length}"/>
-    </item>
-"""
+          item = (
+            "    <item>\n"
+            f"      <title>Version {version}</title>\n"
+            f"      <sparkle:version>{build}</sparkle:version>\n"
+            f"      <sparkle:shortVersionString>{version}</sparkle:shortVersionString>\n"
+            f"      <sparkle:minimumSystemVersion>{min_system}</sparkle:minimumSystemVersion>\n"
+            f"      <pubDate>{pub_date}</pubDate>\n"
+            f"      <enclosure url=\"{url}\"\n"
+            "                 type=\"application/octet-stream\"\n"
+            f"                 sparkle:edSignature=\"{ed_sig}\"\n"
+            f"                 length=\"{length}\"/>\n"
+            "    </item>\n"
+          )
 
           with open("appcast.xml", "r", encoding="utf-8") as f:
             content = f.read()
@@ -100,14 +101,22 @@ jobs:
             print("Appcast already contains this version; skipping update.")
             raise SystemExit(0)
 
-          # Insert after the <language> element
-          pattern = r"(\\s*<language>.*?</language>\\s*)"
-          match = re.search(pattern, content, flags=re.DOTALL)
-          if not match:
-            raise SystemExit("Could not find <language> tag to insert after.")
-
-          insert_at = match.end(1)
-          new_content = content[:insert_at] + "\n" + item + content[insert_at:]
+          language_match = re.search(r"(\\s*<language>.*?</language>\\s*)", content, flags=re.DOTALL)
+          if language_match:
+            insert_at = language_match.end(1)
+            new_content = content[:insert_at] + "\n" + item + content[insert_at:]
+          else:
+            # If no <language> exists, insert before the first <item> if present, otherwise after <channel>.
+            item_match = re.search(r"(\\s*<item>\\s*)", content)
+            if item_match:
+              insert_at = item_match.start(1)
+              new_content = content[:insert_at] + item + content[insert_at:]
+            else:
+              channel_match = re.search(r"(\\s*<channel>\\s*)", content)
+              if not channel_match:
+                raise SystemExit("Could not find <channel> tag to insert after.")
+              insert_at = channel_match.end(1)
+              new_content = content[:insert_at] + "\n" + item + content[insert_at:]
 
           with open("appcast.xml", "w", encoding="utf-8") as f:
             f.write(new_content)
