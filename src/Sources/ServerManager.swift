@@ -539,6 +539,10 @@ class ServerManager: ObservableObject {
         let bundledConfigPath = (resourcePath as NSString).appendingPathComponent("config.yaml")
         let authDir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".cli-proxy-api")
 
+        guard let bundledContent = try? String(contentsOfFile: bundledConfigPath, encoding: .utf8) else {
+            return bundledConfigPath
+        }
+
         // Check for Z.AI auth files
         var zaiApiKeys: [String] = []
         if let files = try? FileManager.default.contentsOfDirectory(at: authDir, includingPropertiesForKeys: nil) {
@@ -559,13 +563,11 @@ class ServerManager: ObservableObject {
             }
         }
 
-        // If no Z.AI keys and no disabled providers, use bundled config
-        guard !zaiApiKeys.isEmpty || !disabledProviders.isEmpty else {
-            return bundledConfigPath
-        }
+        let enforcedBundledContent = Self.enforceLocalhost(in: bundledContent)
+        let shouldWriteMergedConfig = !zaiApiKeys.isEmpty || !disabledProviders.isEmpty || enforcedBundledContent != bundledContent
 
-        // Generate merged config
-        guard let bundledContent = try? String(contentsOfFile: bundledConfigPath, encoding: .utf8) else {
+        // If no Z.AI keys, no disabled providers, and host already correct, use bundled config
+        guard shouldWriteMergedConfig else {
             return bundledConfigPath
         }
 
@@ -619,10 +621,13 @@ openai-compatibility:
 """
         }
 
-        let mergedContent = bundledContent + additionalConfig
+        let mergedContent = enforcedBundledContent + additionalConfig
         let mergedConfigPath = authDir.appendingPathComponent("merged-config.yaml")
 
         do {
+            if !FileManager.default.fileExists(atPath: authDir.path) {
+                try FileManager.default.createDirectory(at: authDir, withIntermediateDirectories: true)
+            }
             try mergedContent.write(to: mergedConfigPath, atomically: true, encoding: .utf8)
             // Set secure permissions (0600 - owner read/write only) since config contains API keys
             try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: mergedConfigPath.path)
@@ -631,6 +636,28 @@ openai-compatibility:
             NSLog("[ServerManager] Failed to write merged config: %@", error.localizedDescription)
             return bundledConfigPath
         }
+    }
+
+    private static func enforceLocalhost(in content: String) -> String {
+        let hostPattern = #"(?m)^host[ \t]*:[ \t]*.*$"#
+        if let range = content.range(of: hostPattern, options: .regularExpression) {
+            var updated = content
+            updated.replaceSubrange(range, with: "host: 127.0.0.1")
+            return updated
+        }
+
+        let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.hasPrefix("---") {
+            guard let range = content.range(of: "---") else {
+                return "host: 127.0.0.1\n" + content
+            }
+            let afterMarker = content.index(range.upperBound, offsetBy: 0)
+            let prefix = String(content[..<afterMarker])
+            let suffix = String(content[afterMarker...])
+            return prefix + "\nhost: 127.0.0.1" + suffix
+        }
+
+        return "host: 127.0.0.1\n" + content
     }
 
     func getLogs() -> [String] {
